@@ -19,6 +19,7 @@
 #include <rerun.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -111,6 +112,59 @@ static bool load_trajectory(const std::string& path, int traj_idx,
     std::printf("  %d knots, %d controls, total_time=%.3f s\n",
                 n_knots, n_controls, traj.times.back());
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Resample trajectory to uniform dt via linear interpolation
+// ---------------------------------------------------------------------------
+static void resample_trajectory(TrajoptTrajectory& traj, double target_dt)
+{
+    if (traj.times.size() < 2) return;
+
+    double t_start = traj.times.front();
+    double t_end   = traj.times.back();
+    int n_new = static_cast<int>(std::ceil((t_end - t_start) / target_dt)) + 1;
+
+    TrajoptTrajectory resampled;
+    resampled.times.resize(n_new);
+    resampled.states.resize(n_new);
+    resampled.controls.resize(std::max(0, n_new - 1));
+
+    int src = 0;  // current index in original trajectory
+    int n_orig = static_cast<int>(traj.times.size());
+
+    for (int k = 0; k < n_new; ++k) {
+        double t = t_start + k * target_dt;
+        if (t > t_end) t = t_end;
+        resampled.times[k] = t;
+
+        // Advance src so traj.times[src] <= t < traj.times[src+1]
+        while (src < n_orig - 2 && traj.times[src + 1] < t)
+            ++src;
+
+        double t0 = traj.times[src];
+        double t1 = traj.times[std::min(src + 1, n_orig - 1)];
+        double alpha = (t1 > t0) ? (t - t0) / (t1 - t0) : 0.0;
+        alpha = std::clamp(alpha, 0.0, 1.0);
+
+        int s0 = src;
+        int s1 = std::min(src + 1, n_orig - 1);
+
+        for (int i = 0; i < 6; ++i)
+            resampled.states[k][i] = (1.0 - alpha) * traj.states[s0][i]
+                                   +        alpha  * traj.states[s1][i];
+
+        if (k < n_new - 1) {
+            int c0 = std::min(s0, static_cast<int>(traj.controls.size()) - 1);
+            int c1 = std::min(s1, static_cast<int>(traj.controls.size()) - 1);
+            for (int i = 0; i < 3; ++i)
+                resampled.controls[k][i] = (1.0 - alpha) * traj.controls[c0][i]
+                                         +        alpha  * traj.controls[c1][i];
+        }
+    }
+
+    traj = std::move(resampled);
+    std::printf("  Resampled to %d knots at dt=%.6f s\n", n_new, target_dt);
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +268,16 @@ int main(int argc, char** argv)
     TrajoptParams tp;
     if (!load_trajectory(project_file, traj_idx, traj, tp))
         return 1;
+
+    // Resample to uniform dt (use the minimum segment dt)
+    {
+        double min_dt = 1e9;
+        for (size_t k = 0; k + 1 < traj.times.size(); ++k) {
+            double dt = traj.times[k + 1] - traj.times[k];
+            if (dt > 1e-12 && dt < min_dt) min_dt = dt;
+        }
+        resample_trajectory(traj, min_dt);
+    }
 
     // Set up MPC model params (matching trajopt)
     ModelParams params{};
