@@ -25,8 +25,9 @@ QPSolution mpc_solve_online(const PrecomputedWindow& window, const double x0[NX]
 
     int n_iter = 0;
     bool warm_hit = false;
+    double step_size = 1.0 / window.lambda_max;
 
-    // ---- Path A: try shifted warm-start (KKT shortcut only) ----
+    // ---- Path A: try shifted warm-start ----
     if (workspace.warm_valid && workspace.prev_n_vars == n_vars) {
         // Shift previous solution by one timestep
         for (int i = 0; i < n_vars - NU; ++i)
@@ -34,16 +35,21 @@ QPSolution mpc_solve_online(const PrecomputedWindow& window, const double x0[NX]
         for (int i = n_vars - NU; i < n_vars; ++i)
             workspace.U[i] = 0.0;
 
-        // Accept only if shifted solution satisfies KKT for the new QP
+        // Accept if shifted solution satisfies KKT for the new QP
         if (is_feasible(workspace.U, n_vars, config.u_min, config.u_max) &&
             check_box_kkt(window.H, workspace.grad, workspace.U,
                           config.u_min, config.u_max, n_vars, workspace.temp)) {
             warm_hit = true;  // 0 iterations — use shifted solution directly
+        } else {
+            // FISTA from shifted warm-start
+            n_iter = fista_box_qp_solve(window.H, workspace.grad,
+                                        config.u_min, config.u_max, n_vars, 50,
+                                        step_size, workspace);
         }
     }
 
-    // ---- Path B: cold start (first call, n_vars mismatch, or warm KKT failed) ----
-    if (!warm_hit) {
+    // ---- Path B: cold start (first call, n_vars mismatch) ----
+    if (!warm_hit && n_iter == 0) {
         // Unconstrained solve via precomputed Cholesky
         for (int i = 0; i < n_vars; ++i)
             workspace.temp[i] = -workspace.grad[i];
@@ -51,10 +57,11 @@ QPSolution mpc_solve_online(const PrecomputedWindow& window, const double x0[NX]
         mpc_linalg::trsv_upper_trans(n_vars, window.L, workspace.rhs, workspace.U);
 
         if (!is_feasible(workspace.U, n_vars, config.u_min, config.u_max)) {
-            // Active-set solve, skip redundant unconstrained solve inside box_qp_solve
-            n_iter = box_qp_solve(window.H, window.L, workspace.grad,
-                                  config.u_min, config.u_max, n_vars, 10,
-                                  workspace, /*skip_unconstrained=*/true);
+            // FISTA from clipped unconstrained solution
+            clip_to_bounds(workspace.U, n_vars, config.u_min, config.u_max);
+            n_iter = fista_box_qp_solve(window.H, workspace.grad,
+                                        config.u_min, config.u_max, n_vars, 50,
+                                        step_size, workspace);
         }
     }
 

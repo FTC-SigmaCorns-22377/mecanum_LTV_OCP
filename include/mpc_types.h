@@ -51,6 +51,7 @@ struct PrecomputedWindow {
     double x_ref_0[NX];                    // reference state at window start
     int N;                                  // horizon length
     int n_vars;                             // N * NU
+    double lambda_max;                      // largest eigenvalue of H (FISTA step size = 1/lambda_max)
 };
 
 // Online QP solution
@@ -72,6 +73,10 @@ struct BoxQPWorkspace {
     double temp[N_MAX * NU];
     int free_idx[N_MAX * NU];
     int clamped_idx[N_MAX * NU];
+
+    // FISTA workspace
+    double V[N_MAX * NU];       // momentum/extrapolation point
+    double U_old[N_MAX * NU];   // previous iterate (for restart check)
 
     // Warm-start state (zero-init sets warm_valid = false)
     double U_prev[N_MAX * NU];  // previous solution (shifted for warm-start)

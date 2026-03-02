@@ -163,20 +163,39 @@ static void convert_to_refnodes(const TrajoptTrajectory& traj,
 }
 
 // ---------------------------------------------------------------------------
-// Euler simulation step (using continuous dynamics)
+// RK4 simulation step (using continuous dynamics)
 // ---------------------------------------------------------------------------
-static void euler_step(double* x, const double* u, double dt,
-                        const ModelParams& params)
+static void xdot(const double* x, const double* u, const ModelParams& params,
+                 double* dx)
 {
     double Ac[NX * NX], Bc[NX * NU];
     continuous_dynamics(x[2], params, Ac, Bc);
 
-    double Ax[NX], Bu[NX];
-    mpc_linalg::gemv(NX, NX, Ac, x, Ax);
+    double Bu[NX];
+    mpc_linalg::gemv(NX, NX, Ac, x, dx);
     mpc_linalg::gemv(NX, NU, Bc, u, Bu);
+    for (int i = 0; i < NX; ++i)
+        dx[i] += Bu[i];
+}
+
+static void rk4_step(double* x, const double* u, double dt,
+                     const ModelParams& params)
+{
+    double k1[NX], k2[NX], k3[NX], k4[NX], tmp[NX];
+
+    xdot(x, u, params, k1);
+
+    for (int i = 0; i < NX; ++i) tmp[i] = x[i] + 0.5 * dt * k1[i];
+    xdot(tmp, u, params, k2);
+
+    for (int i = 0; i < NX; ++i) tmp[i] = x[i] + 0.5 * dt * k2[i];
+    xdot(tmp, u, params, k3);
+
+    for (int i = 0; i < NX; ++i) tmp[i] = x[i] + dt * k3[i];
+    xdot(tmp, u, params, k4);
 
     for (int i = 0; i < NX; ++i)
-        x[i] += dt * (Ax[i] + Bu[i]);
+        x[i] += (dt / 6.0) * (k1[i] + 2.0*k2[i] + 2.0*k3[i] + k4[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +204,7 @@ static void euler_step(double* x, const double* u, double dt,
 int main(int argc, char** argv)
 {
     // Parse arguments
-    std::string project_file = "/home/dolphinpod/dev/mecanum_trajopt/projects/base.json";
+    std::string project_file = "/home/dolphinpod/dev/mecanum_trajopt/projects/turntest.json";
     int traj_idx = 0;
     if (argc > 1) project_file = argv[1];
     if (argc > 2) traj_idx = std::atoi(argv[2]);
@@ -221,7 +240,7 @@ int main(int argc, char** argv)
 
     // MPC config
     MPCConfig config{};
-    config.N     = 20;
+    config.N     = 30;
     config.dt    = traj.times[1] - traj.times[0];  // use trajectory dt
     config.u_min = -1.0;
     config.u_max =  1.0;
@@ -230,15 +249,15 @@ int main(int argc, char** argv)
     std::memset(config.Q, 0, sizeof(config.Q));
     config.Q[0 + NX * 0] = 100.0;  // px
     config.Q[1 + NX * 1] = 100.0;  // py
-    config.Q[2 + NX * 2] =  5.0;  // theta
-    config.Q[3 + NX * 3] =  10.0;  // vx
-    config.Q[4 + NX * 4] =  10.0;  // vy
-    config.Q[5 + NX * 5] =  0.5;  // omega
+    config.Q[2 + NX * 2] =  1000.0;  // theta
+    config.Q[3 + NX * 3] =  100.0;  // vx
+    config.Q[4 + NX * 4] =  100.0;  // vy
+    config.Q[5 + NX * 5] =  10.0;  // omega
 
     // R = diag(0.01, 0.01, 0.01, 0.01)
     std::memset(config.R, 0, sizeof(config.R));
     for (int i = 0; i < NU; ++i)
-        config.R[i + NU * i] = 0.001;
+        config.R[i + NU * i] = 0.005;
 
     // Qf = 2*Q
     for (int i = 0; i < NX * NX; ++i)
@@ -333,11 +352,25 @@ int main(int argc, char** argv)
         double err_pos = std::sqrt(
             (x_cur[0] - ref_path[k].x_ref[0]) * (x_cur[0] - ref_path[k].x_ref[0]) +
             (x_cur[1] - ref_path[k].x_ref[1]) * (x_cur[1] - ref_path[k].x_ref[1]));
-        double err_heading = std::fabs(x_cur[2] - ref_path[k].x_ref[2]);
+        double err_heading = std::fabs(x_cur[2] - ref_path[k].x_ref[2]);  // unsigned magnitude
+
+        // Signed per-state errors
+        double err_px    = x_cur[0] - ref_path[k].x_ref[0];
+        double err_py    = x_cur[1] - ref_path[k].x_ref[1];
+        double err_theta = x_cur[2] - ref_path[k].x_ref[2];
+        double err_vx    = x_cur[3] - ref_path[k].x_ref[3];
+        double err_vy    = x_cur[4] - ref_path[k].x_ref[4];
+        double err_omega = x_cur[5] - ref_path[k].x_ref[5];
 
         // Log metrics
         rec.log("metrics/position_error", rerun::Scalars(err_pos));
         rec.log("metrics/heading_error", rerun::Scalars(err_heading));
+        rec.log("errors/px",    rerun::Scalars(err_px));
+        rec.log("errors/py",    rerun::Scalars(err_py));
+        rec.log("errors/theta", rerun::Scalars(err_theta));
+        rec.log("errors/vx",    rerun::Scalars(err_vx));
+        rec.log("errors/vy",    rerun::Scalars(err_vy));
+        rec.log("errors/omega", rerun::Scalars(err_omega));
         rec.log("metrics/solve_time_us", rerun::Scalars(sol.solve_time_ns / 1000.0));
         rec.log("metrics/n_active", rerun::Scalars(static_cast<double>(sol.n_active)));
 
@@ -369,7 +402,7 @@ int main(int argc, char** argv)
                     .with_radii({0.02f}));
 
         // Simulate forward
-        euler_step(x_cur, sol.u0, config.dt, params);
+        rk4_step(x_cur, sol.u0, config.dt, params);
 
         actual_pts.push_back({static_cast<float>(x_cur[0]),
                               static_cast<float>(x_cur[1])});

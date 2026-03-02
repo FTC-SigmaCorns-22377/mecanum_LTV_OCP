@@ -10,6 +10,13 @@ int box_qp_solve(const double* H, const double* L, const double* g,
                  double u_min, double u_max, int n, int max_iter,
                  BoxQPWorkspace& workspace, bool skip_unconstrained = false);
 
+// FISTA (accelerated projected gradient) solver for box-constrained QP
+// Same problem as box_qp_solve but with O(n^2) per-iteration cost (one gemv)
+// step_size should be 1.0 / lambda_max(H)
+int fista_box_qp_solve(const double* H, const double* g,
+                       double u_min, double u_max, int n, int max_iter,
+                       double step_size, BoxQPWorkspace& workspace);
+
 // Check box-constrained KKT conditions at U.
 // Computes gradient grad = H*U + g into grad_out (must be size n).
 // Returns true if KKT conditions are satisfied.

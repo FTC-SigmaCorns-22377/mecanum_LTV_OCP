@@ -173,6 +173,69 @@ int box_qp_solve(const double* H, const double* L, const double* g,
 }
 
 // ---------------------------------------------------------------------------
+// fista_box_qp_solve: FISTA (accelerated projected gradient) for box QP
+//   min 0.5 U' H U + g' U   s.t.  u_min <= U_i <= u_max
+//   O(n^2) per iteration (one gemv), O(1/k^2) convergence rate
+// ---------------------------------------------------------------------------
+int fista_box_qp_solve(const double* H, const double* g,
+                       double u_min, double u_max, int n, int max_iter,
+                       double step_size, BoxQPWorkspace& ws)
+{
+    constexpr double CONV_TOL = 1.0e-10;
+
+    // V = ws.U (initial extrapolation point)
+    std::memcpy(ws.V, ws.U, static_cast<std::size_t>(n) * sizeof(double));
+
+    double t = 1.0;
+
+    for (int k = 0; k < max_iter; ++k) {
+        // grad = H * V + g  (into ws.U_old to avoid aliasing — g may be ws.grad)
+        mpc_linalg::gemv(n, n, H, ws.V, ws.U_old);
+        mpc_linalg::axpy(n, 1.0, g, ws.U_old);
+
+        // U_new = clip(V - step * grad)  (into ws.temp)
+        for (int i = 0; i < n; ++i) {
+            double val = ws.V[i] - step_size * ws.U_old[i];
+            if (val < u_min) val = u_min;
+            else if (val > u_max) val = u_max;
+            ws.temp[i] = val;
+        }
+
+        // Convergence check: max|U_new - U_old| < tol
+        double max_diff = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double d = std::fabs(ws.temp[i] - ws.U[i]);
+            if (d > max_diff) max_diff = d;
+        }
+        if (max_diff < CONV_TOL) {
+            std::memcpy(ws.U, ws.temp, static_cast<std::size_t>(n) * sizeof(double));
+            return k + 1;
+        }
+
+        // Gradient restart: if momentum caused overshoot, reset t
+        // Check: dot(grad, U_new - U_old) > 0  means we overshot
+        double restart_dot = 0.0;
+        for (int i = 0; i < n; ++i)
+            restart_dot += ws.U_old[i] * (ws.temp[i] - ws.U[i]);
+        if (restart_dot > 0.0)
+            t = 1.0;
+
+        // FISTA momentum update
+        double t_new = (1.0 + std::sqrt(1.0 + 4.0 * t * t)) / 2.0;
+        double beta = (t - 1.0) / t_new;
+
+        for (int i = 0; i < n; ++i)
+            ws.V[i] = ws.temp[i] + beta * (ws.temp[i] - ws.U[i]);
+
+        // U = U_new
+        std::memcpy(ws.U, ws.temp, static_cast<std::size_t>(n) * sizeof(double));
+        t = t_new;
+    }
+
+    return max_iter;
+}
+
+// ---------------------------------------------------------------------------
 // check_box_kkt: verify KKT conditions for box-constrained QP at point U
 //   Computes grad = H*U + g, then checks:
 //     - free variables: |grad_i| <= tol

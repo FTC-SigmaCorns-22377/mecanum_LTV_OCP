@@ -1,9 +1,42 @@
 #include "condensing.h"
 #include "cholesky.h"
+#include "blas_dispatch.h"
 
 #include <cblas.h>
 #include <cstring>
 #include <cmath>
+
+// ---------------------------------------------------------------------------
+// power_iteration_lambda_max: estimate largest eigenvalue of H via power method
+// ---------------------------------------------------------------------------
+static double power_iteration_lambda_max(const double* H, int n, int n_iters = 30)
+{
+    double v[N_MAX * NU];
+    double Hv[N_MAX * NU];
+
+    // Initialize v = [1, 1, ..., 1] / sqrt(n)
+    double inv_sqrt_n = 1.0 / std::sqrt(static_cast<double>(n));
+    for (int i = 0; i < n; ++i)
+        v[i] = inv_sqrt_n;
+
+    double lambda = 0.0;
+    for (int iter = 0; iter < n_iters; ++iter) {
+        // Hv = H * v
+        mpc_linalg::gemv(n, n, H, v, Hv);
+
+        // lambda = v' * Hv  (Rayleigh quotient)
+        lambda = mpc_linalg::dot(n, v, Hv);
+
+        // v = Hv / ||Hv||
+        double norm = std::sqrt(mpc_linalg::dot(n, Hv, Hv));
+        if (norm < 1e-15) break;
+        double inv_norm = 1.0 / norm;
+        mpc_linalg::scal(n, inv_norm, Hv);
+        std::memcpy(v, Hv, static_cast<std::size_t>(n) * sizeof(double));
+    }
+
+    return lambda;
+}
 
 // ---------------------------------------------------------------------------
 // build_prediction_matrices
@@ -219,6 +252,9 @@ void condense_window(const double* A_list, const double* B_list,
 
     // Form Hessian: H = Gamma^T Q_bar Gamma + R_bar
     form_hessian(Gamma, config.Q, config.Qf, config.R, N, window.H);
+
+    // Compute largest eigenvalue for FISTA step size
+    window.lambda_max = power_iteration_lambda_max(window.H, n_vars);
 
     // Cholesky factorization: H = L * L^T
     cholesky_factor(n_vars, window.H, window.L);
