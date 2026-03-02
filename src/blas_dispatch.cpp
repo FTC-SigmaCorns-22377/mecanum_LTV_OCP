@@ -74,6 +74,10 @@ void gemm_atb(int m, int n, int k, const double* A, int lda,
                 1.0, A, lda, B, ldb, 0.0, C, ldc);
 }
 
+void symv(int n, const double* A, const double* x, double* y) {
+    cblas_dsymv(CblasColMajor, CblasUpper, n, 1.0, A, n, x, 1, 0.0, y, 1);
+}
+
 void scal(int n, double alpha, double* x) {
     cblas_dscal(n, alpha, x, 1);
 }

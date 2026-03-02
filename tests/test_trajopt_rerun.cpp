@@ -247,11 +247,11 @@ int main(int argc, char** argv)
 
     // Q = diag(10, 10, 5, 1, 1, 0.5)
     std::memset(config.Q, 0, sizeof(config.Q));
-    config.Q[0 + NX * 0] = 100.0;  // px
-    config.Q[1 + NX * 1] = 100.0;  // py
-    config.Q[2 + NX * 2] =  1000.0;  // theta
-    config.Q[3 + NX * 3] =  100.0;  // vx
-    config.Q[4 + NX * 4] =  100.0;  // vy
+    config.Q[0 + NX * 0] = 300.0;  // px
+    config.Q[1 + NX * 1] = 300.0;  // py
+    config.Q[2 + NX * 2] =  300.0;  // theta
+    config.Q[3 + NX * 3] =  10.0;  // vx
+    config.Q[4 + NX * 4] =  10.0;  // vy
     config.Q[5 + NX * 5] =  10.0;  // omega
 
     // R = diag(0.01, 0.01, 0.01, 0.01)
@@ -304,13 +304,13 @@ int main(int argc, char** argv)
 
     // Log reference trajectory as a static line strip
     {
-        std::vector<rerun::Position2D> ref_pts;
+        std::vector<rerun::Vec2D> ref_pts;
         ref_pts.reserve(n_path);
         for (int k = 0; k < n_path; ++k)
             ref_pts.push_back({static_cast<float>(ref_path[k].x_ref[0]),
                                static_cast<float>(ref_path[k].x_ref[1])});
         rec.log_static("trajectory/reference",
-                        rerun::LineStrips2D({ref_pts})
+                        rerun::LineStrips2D(rerun::LineStrip2D(ref_pts))
                             .with_colors({rerun::Color(100, 100, 255)}));
     }
 
@@ -334,7 +334,7 @@ int main(int argc, char** argv)
     std::memcpy(x_cur, ref_path[0].x_ref, NX * sizeof(double));
 
     int n_sim = std::min(n_windows, n_path - 1);
-    std::vector<rerun::Position2D> actual_pts;
+    std::vector<rerun::Vec2D> actual_pts;
     actual_pts.reserve(n_sim + 1);
     actual_pts.push_back({static_cast<float>(x_cur[0]),
                           static_cast<float>(x_cur[1])});
@@ -409,7 +409,7 @@ int main(int argc, char** argv)
 
         // Log growing actual trajectory
         rec.log("trajectory/actual",
-                rerun::LineStrips2D({actual_pts})
+                rerun::LineStrips2D(rerun::LineStrip2D(actual_pts))
                     .with_colors({rerun::Color(0, 200, 0)}));
 
         if (k % 10 == 0 || k == n_sim - 1) {

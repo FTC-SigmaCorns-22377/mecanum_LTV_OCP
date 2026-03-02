@@ -25,6 +25,7 @@
 #include <array>
 #include <algorithm>
 #include <numeric>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -164,7 +165,7 @@ struct SolverRun {
     QpSolverType type;
     SolverContext ctx;
     double x_cur[NX];
-    std::vector<rerun::Position2D> actual_pts;
+    std::vector<rerun::Vec2D> actual_pts;
     std::vector<double> solve_times_us;
     rerun::Color color;
 };
@@ -213,8 +214,8 @@ int main(int argc, char** argv)
     config.Q[0 + NX * 0] = 100.0;
     config.Q[1 + NX * 1] = 100.0;
     config.Q[2 + NX * 2] = 1000.0;
-    config.Q[3 + NX * 3] = 100.0;
-    config.Q[4 + NX * 4] = 100.0;
+    config.Q[3 + NX * 3] = 10.0;
+    config.Q[4 + NX * 4] = 10.0;
     config.Q[5 + NX * 5] = 10.0;
 
     std::memset(config.R, 0, sizeof(config.R));
@@ -295,20 +296,30 @@ int main(int argc, char** argv)
 
     // Log reference trajectory (static)
     {
-        std::vector<rerun::Position2D> ref_pts;
+        std::vector<rerun::Vec2D> ref_pts;
         ref_pts.reserve(n_path);
         for (int k = 0; k < n_path; ++k)
             ref_pts.push_back({static_cast<float>(ref_path[k].x_ref[0]),
                                static_cast<float>(ref_path[k].x_ref[1])});
         rec.log_static("reference/trajectory",
-                        rerun::LineStrips2D({ref_pts})
+                        rerun::LineStrips2D(rerun::LineStrip2D(ref_pts))
                             .with_colors({rerun::Color(100, 100, 255)}));
     }
 
-    // Main simulation loop
+    // Disturbance noise: pre-generate so every solver sees identical noise
+    constexpr double NOISE_STDDEV = 0.05;  // duty-cycle units (5% of full range)
+    constexpr unsigned NOISE_SEED = 42;
     int n_sim = std::min(n_windows, n_path - 1);
-    std::printf("\nRunning %d steps with %zu solvers...\n",
-                n_sim, runs.size());
+
+    std::mt19937 rng(NOISE_SEED);
+    std::normal_distribution<double> noise_dist(0.0, NOISE_STDDEV);
+    std::vector<std::array<double, NU>> noise_table(n_sim);
+    for (int k = 0; k < n_sim; ++k)
+        for (int j = 0; j < NU; ++j)
+            noise_table[k][j] = noise_dist(rng);
+
+    std::printf("\nRunning %d steps with %zu solvers (noise σ=%.3f)...\n",
+                n_sim, runs.size(), NOISE_STDDEV);
 
     for (int k = 0; k < n_sim; ++k) {
         double t = ref_path[k].t;
@@ -351,15 +362,21 @@ int main(int argc, char** argv)
                         .with_colors({run.color})
                         .with_radii({0.02f}));
 
-            // Simulate forward
-            rk4_step(run.x_cur, sol.u0, config.dt, params);
+            // Add disturbance noise to control (same noise for all solvers)
+            double u_noisy[NU];
+            for (int j = 0; j < NU; ++j)
+                u_noisy[j] = std::clamp(sol.u0[j] + noise_table[k][j],
+                                        config.u_min, config.u_max);
+
+            // Simulate forward with noisy control
+            rk4_step(run.x_cur, u_noisy, config.dt, params);
 
             run.actual_pts.push_back({static_cast<float>(run.x_cur[0]),
                                       static_cast<float>(run.x_cur[1])});
 
             // Log growing actual trajectory
             rec.log("trajectory/" + prefix,
-                    rerun::LineStrips2D({run.actual_pts})
+                    rerun::LineStrips2D(rerun::LineStrip2D(run.actual_pts))
                         .with_colors({run.color}));
 
             // Log per-state solved trajectory
@@ -370,6 +387,11 @@ int main(int argc, char** argv)
             rec.log("state/vy/" + prefix, rerun::Scalars(run.x_cur[4]));
             rec.log("state/omega/" + prefix, rerun::Scalars(run.x_cur[5]));
         }
+
+        // Log noise (shared across solvers, so log once per step)
+        for (int j = 0; j < NU; ++j)
+            rec.log("noise/u" + std::to_string(j),
+                    rerun::Scalars(noise_table[k][j]));
 
         if (k % 20 == 0 || k == n_sim - 1) {
             std::printf("  step %3d/%d", k, n_sim);

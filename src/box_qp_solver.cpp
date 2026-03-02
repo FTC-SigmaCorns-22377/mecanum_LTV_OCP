@@ -2,6 +2,8 @@
 #include "blas_dispatch.h"
 #include "cholesky.h"
 
+#include <cblas.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -181,42 +183,47 @@ int fista_box_qp_solve(const double* H, const double* g,
                        double u_min, double u_max, int n, int max_iter,
                        double step_size, BoxQPWorkspace& ws)
 {
-    constexpr double CONV_TOL = 1.0e-10;
+    constexpr double CONV_TOL = 1.0e-6;
 
     // V = ws.U (initial extrapolation point)
     std::memcpy(ws.V, ws.U, static_cast<std::size_t>(n) * sizeof(double));
 
+    // Precompute step_size * g (loop-invariant)
+    double g_scaled[N_MAX * NU];
+    for (int i = 0; i < n; ++i)
+        g_scaled[i] = step_size * g[i];
+
     double t = 1.0;
 
     for (int k = 0; k < max_iter; ++k) {
-        // grad = H * V + g  (into ws.U_old to avoid aliasing — g may be ws.grad)
-        mpc_linalg::gemv(n, n, H, ws.V, ws.U_old);
-        mpc_linalg::axpy(n, 1.0, g, ws.U_old);
+        // Compute step_size * (H * V + g) in one dsymv call:
+        //   load g_scaled into U_old, then dsymv with alpha=step_size, beta=1.0
+        //   gives step_size * H * V + step_size * g = step_size * grad
+        std::memcpy(ws.U_old, g_scaled, static_cast<std::size_t>(n) * sizeof(double));
+        cblas_dsymv(CblasColMajor, CblasUpper, n, step_size, H, n,
+                    ws.V, 1, 1.0, ws.U_old, 1);
+        // ws.U_old now = step_size * (H * V + g)
 
-        // U_new = clip(V - step * grad)  (into ws.temp)
+        // Fused: projected step + convergence check + restart dot
+        double max_diff = 0.0;
+        double restart_dot = 0.0;
         for (int i = 0; i < n; ++i) {
-            double val = ws.V[i] - step_size * ws.U_old[i];
+            double val = ws.V[i] - ws.U_old[i];
             if (val < u_min) val = u_min;
             else if (val > u_max) val = u_max;
+            double diff = val - ws.U[i];
+            double ad = (diff >= 0) ? diff : -diff;
+            if (ad > max_diff) max_diff = ad;
+            restart_dot += ws.U_old[i] * diff;
             ws.temp[i] = val;
         }
 
-        // Convergence check: max|U_new - U_old| < tol
-        double max_diff = 0.0;
-        for (int i = 0; i < n; ++i) {
-            double d = std::fabs(ws.temp[i] - ws.U[i]);
-            if (d > max_diff) max_diff = d;
-        }
         if (max_diff < CONV_TOL) {
             std::memcpy(ws.U, ws.temp, static_cast<std::size_t>(n) * sizeof(double));
             return k + 1;
         }
 
         // Gradient restart: if momentum caused overshoot, reset t
-        // Check: dot(grad, U_new - U_old) > 0  means we overshot
-        double restart_dot = 0.0;
-        for (int i = 0; i < n; ++i)
-            restart_dot += ws.U_old[i] * (ws.temp[i] - ws.U[i]);
         if (restart_dot > 0.0)
             t = 1.0;
 
@@ -248,9 +255,9 @@ bool check_box_kkt(const double* H, const double* g, const double* U,
     constexpr double BOUND_TOL = 1.0e-12;
     constexpr double KKT_TOL   = 1.0e-10;
 
-    // grad = H * U + g
-    mpc_linalg::gemv(n, n, H, U, grad_out);
-    mpc_linalg::axpy(n, 1.0, g, grad_out);
+    // grad = H * U + g  (H is symmetric, use dsymv)
+    std::memcpy(grad_out, g, static_cast<std::size_t>(n) * sizeof(double));
+    cblas_dsymv(CblasColMajor, CblasUpper, n, 1.0, H, n, U, 1, 1.0, grad_out, 1);
 
     for (int i = 0; i < n; ++i) {
         bool at_lower = (U[i] <= u_min + BOUND_TOL);
