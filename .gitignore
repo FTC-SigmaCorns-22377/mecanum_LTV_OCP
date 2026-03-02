@@ -1,3 +1,4 @@
 build/
 .claude/
 build-android-a53/
+build-host-jni/

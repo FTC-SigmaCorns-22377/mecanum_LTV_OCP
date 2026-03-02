@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 include(ExternalProject)
 
 option(MPC_USE_NEON "Use custom NEON kernels for online linear algebra" OFF)
+option(MPC_BUILD_JNI "Build JNI shared library (requires JDK)" OFF)
 option(MPC_ENABLE_RERUN "Enable Rerun visualization for tests" OFF)
 option(MPC_USE_HPIPM "Enable HPIPM dense QP solver" OFF)
 option(MPC_USE_QPOASES "Enable qpOASES QP solver" OFF)
@@ -181,12 +182,16 @@ if(MPC_USE_QPOASES)
 endif()
 
 # ---------------------------------------------------------------------------
-# JNI shared library (Android cross-compilation only)
+# JNI shared library
 # ---------------------------------------------------------------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
     add_library(mecanum_ltv_jni SHARED src/mecanum_ltv_jni.cpp)
     target_link_libraries(mecanum_ltv_jni PRIVATE mecanum_mpc)
     target_link_options(mecanum_ltv_jni PRIVATE -Wl,--gc-sections)
+elseif(MPC_BUILD_JNI)
+    find_package(JNI REQUIRED)
+    add_library(mecanum_ltv_jni SHARED src/mecanum_ltv_jni.cpp)
+    target_link_libraries(mecanum_ltv_jni PRIVATE mecanum_mpc JNI::JNI)
 endif()
 
 # ---------------------------------------------------------------------------
