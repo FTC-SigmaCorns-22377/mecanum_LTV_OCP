@@ -328,7 +328,6 @@ int main(int argc, char** argv)
 
     std::vector<SolverDef> solver_defs = {
         {"fista",           QpSolverType::FISTA,      SolveMode::PRECOMPUTED, rerun::Color(0, 200, 0)},
-        //{"active_set",      QpSolverType::ACTIVE_SET,  SolveMode::PRECOMPUTED, rerun::Color(0, 150, 255)},
     };
 
 #ifdef MPC_USE_HPIPM
@@ -339,9 +338,8 @@ int main(int argc, char** argv)
 #endif
 
     // Heading-lookup runs
-    solver_defs.push_back({"hl_trig_fista",      QpSolverType::FISTA,      SolveMode::HL_TRIG,  rerun::Color(0, 255, 100)});
-    //solver_defs.push_back({"hl_trig_active_set", QpSolverType::ACTIVE_SET, SolveMode::HL_TRIG,  rerun::Color(100, 200, 255)});
-    solver_defs.push_back({"hl_table_fista",     QpSolverType::FISTA,      SolveMode::HL_TABLE, rerun::Color(255, 255, 0)});
+    solver_defs.push_back({"hl_trig_fista",  QpSolverType::FISTA, SolveMode::HL_TRIG,  rerun::Color(0, 255, 100)});
+    solver_defs.push_back({"hl_table_fista", QpSolverType::FISTA, SolveMode::HL_TABLE, rerun::Color(255, 255, 0)});
 
 #ifdef MPC_USE_HPIPM
     solver_defs.push_back({"hl_trig_hpipm",  QpSolverType::HPIPM, SolveMode::HL_TRIG,  rerun::Color(255, 200, 100)});

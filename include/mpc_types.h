@@ -59,7 +59,7 @@ struct QPSolution {
     double U[N_MAX * NU];       // full optimized input sequence
     double u0[NU];              // first control: [V1, V2, V3, V4]
     int n_active;               // number of active constraints at solution
-    int n_iterations;           // active-set iterations taken
+    int n_iterations;           // solver iterations taken
     double solve_time_ns;       // timing
 };
 
@@ -68,11 +68,7 @@ struct BoxQPWorkspace {
     double grad[N_MAX * NU];
     double U[N_MAX * NU];
     double rhs[N_MAX * NU];
-    double H_ff[N_MAX * NU * N_MAX * NU];
-    double L_ff[N_MAX * NU * N_MAX * NU];
     double temp[N_MAX * NU];
-    int free_idx[N_MAX * NU];
-    int clamped_idx[N_MAX * NU];
 
     // FISTA workspace
     double V[N_MAX * NU];       // momentum/extrapolation point

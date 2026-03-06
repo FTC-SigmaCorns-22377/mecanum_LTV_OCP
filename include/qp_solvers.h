@@ -7,7 +7,6 @@
 // ---------------------------------------------------------------------------
 enum class QpSolverType {
     FISTA,
-    ACTIVE_SET,
     HPIPM,
     QPOASES,
     HPIPM_OCP
@@ -81,7 +80,7 @@ int qpoases_box_qp_solve(const double* H, const double* g,
 // Unified solver context — holds workspaces for all enabled solvers
 // ---------------------------------------------------------------------------
 struct SolverContext {
-    BoxQPWorkspace box_ws;     // always available (FISTA / active-set)
+    BoxQPWorkspace box_ws;     // always available (FISTA)
 
 #ifdef MPC_USE_HPIPM
     HpipmWorkspace hpipm_ws;
@@ -111,7 +110,6 @@ QPSolution mpc_solve_with_solver(const PrecomputedWindow& window,
 inline bool solver_available(QpSolverType type) {
     switch (type) {
         case QpSolverType::FISTA:
-        case QpSolverType::ACTIVE_SET:
             return true;
         case QpSolverType::HPIPM:
 #ifdef MPC_USE_HPIPM
@@ -138,7 +136,6 @@ inline bool solver_available(QpSolverType type) {
 inline const char* solver_name(QpSolverType type) {
     switch (type) {
         case QpSolverType::FISTA:      return "fista";
-        case QpSolverType::ACTIVE_SET: return "active_set";
         case QpSolverType::HPIPM:      return "hpipm";
         case QpSolverType::QPOASES:    return "qpoases";
         case QpSolverType::HPIPM_OCP:  return "hpipm_ocp";

@@ -182,7 +182,7 @@ static void bench_constrained(const PrecomputedWindow* windows,
     // Mean iterations
     double sum_iter = 0.0;
     for (int i = 0; i < N_RUNS; ++i) sum_iter += iterations[i];
-    std::printf("  mean active-set iterations: %.1f\n", sum_iter / N_RUNS);
+    std::printf("  mean fista iterations: %.1f\n", sum_iter / N_RUNS);
 }
 
 // ---------------------------------------------------------------------------

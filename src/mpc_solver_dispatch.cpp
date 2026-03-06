@@ -109,27 +109,6 @@ QPSolution mpc_solve_with_solver(const PrecomputedWindow& window,
         break;
     }
 
-    case QpSolverType::ACTIVE_SET: {
-        if (have_warm) {
-            if (is_feasible(ws.U, n_vars, config.u_min, config.u_max) &&
-                check_box_kkt(window.H, ws.grad, ws.U,
-                              config.u_min, config.u_max, n_vars, ws.temp)) {
-                n_iter = 0;
-            } else {
-                // Active-set from warm-start (skip unconstrained solve since we have a feasible start)
-                clip_to_bounds(ws.U, n_vars, config.u_min, config.u_max);
-                n_iter = box_qp_solve(window.H, window.L, ws.grad,
-                                      config.u_min, config.u_max,
-                                      n_vars, 50, ws, true);
-            }
-        } else {
-            n_iter = box_qp_solve(window.H, window.L, ws.grad,
-                                  config.u_min, config.u_max,
-                                  n_vars, 50, ws);
-        }
-        break;
-    }
-
 #ifdef MPC_USE_HPIPM
     case QpSolverType::HPIPM: {
         const double* warm = have_warm ? ws.U : nullptr;

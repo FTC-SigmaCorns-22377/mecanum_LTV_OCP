@@ -2,16 +2,9 @@
 
 #include "mpc_types.h"
 
-// Solve box-constrained QP: min 0.5 U' H U + g' U  s.t.  u_min <= U <= u_max
-// H is n x n SPD, L is its Cholesky factor, g is the gradient vector
-// U_warm is the warm-start (typically unconstrained solution)
-// Result written to workspace.U, returns number of iterations
-int box_qp_solve(const double* H, const double* L, const double* g,
-                 double u_min, double u_max, int n, int max_iter,
-                 BoxQPWorkspace& workspace, bool skip_unconstrained = false);
-
 // FISTA (accelerated projected gradient) solver for box-constrained QP
-// Same problem as box_qp_solve but with O(n^2) per-iteration cost (one gemv)
+// min 0.5 U' H U + g' U  s.t.  u_min <= U <= u_max
+// O(n^2) per-iteration cost (one gemv), O(1/k^2) convergence rate
 // step_size should be 1.0 / lambda_max(H)
 int fista_box_qp_solve(const double* H, const double* g,
                        double u_min, double u_max, int n, int max_iter,

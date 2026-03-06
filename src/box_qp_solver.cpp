@@ -1,8 +1,6 @@
 #include "box_qp_solver.h"
 #include "blas_dispatch.h"
-#include "cholesky.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -50,126 +48,6 @@ int clip_to_bounds(double* U, int n, double u_min, double u_max)
         }
     }
     return count;
-}
-
-// ---------------------------------------------------------------------------
-// box_qp_solve: active-set method for box-constrained QP
-//   min 0.5 U' H U + g' U   s.t.  u_min <= U_i <= u_max
-// ---------------------------------------------------------------------------
-int box_qp_solve(const double* H, const double* L, const double* g,
-                 double u_min, double u_max, int n, int max_iter,
-                 BoxQPWorkspace& ws, bool skip_unconstrained)
-{
-    constexpr double BOUND_TOL = 1.0e-12;
-    constexpr double KKT_TOL   = 1.0e-10;
-
-    if (!skip_unconstrained) {
-        // Step 1: unconstrained solution
-        unconstrained_solve(L, g, n, ws.U);
-
-        if (is_feasible(ws.U, n, u_min, u_max))
-            return 0;
-    }
-
-    // Clip to bounds before entering active-set loop
-    clip_to_bounds(ws.U, n, u_min, u_max);
-
-    // Active-set iterations
-    int iter = 0;
-    for (; iter < max_iter; ++iter) {
-
-        // (a) Compute gradient: grad = H * U + g
-        mpc_linalg::gemv(n, n, H, ws.U, ws.grad);
-        mpc_linalg::axpy(n, 1.0, g, ws.grad);
-
-        // (b) Classify variables as free or clamped
-        int n_free    = 0;
-        int n_clamped = 0;
-
-        for (int i = 0; i < n; ++i) {
-            bool at_lower = (ws.U[i] <= u_min + BOUND_TOL);
-            bool at_upper = (ws.U[i] >= u_max - BOUND_TOL);
-            bool clamped  = (at_lower && ws.grad[i] >= 0.0) ||
-                            (at_upper && ws.grad[i] <= 0.0);
-            if (clamped) {
-                ws.clamped_idx[n_clamped++] = i;
-            } else {
-                ws.free_idx[n_free++] = i;
-            }
-        }
-
-        // (c) All clamped -- nothing to improve
-        if (n_free == 0)
-            break;
-
-        // (d) Extract reduced Hessian H_ff (n_free x n_free)
-        for (int b = 0; b < n_free; ++b) {
-            for (int a = 0; a < n_free; ++a) {
-                ws.H_ff[a + n_free * b] = H[ws.free_idx[a] + n * ws.free_idx[b]];
-            }
-        }
-
-        // (e) Compute reduced RHS
-        //     rhs[a] = -g[free_idx[a]]
-        //              - sum_j H[free_idx[a], clamped_idx[j]] * U[clamped_idx[j]]
-        for (int a = 0; a < n_free; ++a) {
-            double r = -g[ws.free_idx[a]];
-            for (int j = 0; j < n_clamped; ++j) {
-                r -= H[ws.free_idx[a] + n * ws.clamped_idx[j]] * ws.U[ws.clamped_idx[j]];
-            }
-            ws.rhs[a] = r;
-        }
-
-        // (f) Factorize H_ff and solve for free variables
-        std::memcpy(ws.L_ff, ws.H_ff,
-                    static_cast<std::size_t>(n_free) * static_cast<std::size_t>(n_free) * sizeof(double));
-        cholesky_factor_inplace(n_free, ws.L_ff);
-        cholesky_solve_inplace(n_free, ws.L_ff, ws.rhs);
-        // ws.rhs[0..n_free-1] now holds the candidate free-variable values
-
-        // (g) Line search with bound clamping
-        double alpha = 1.0;
-        for (int a = 0; a < n_free; ++a) {
-            int idx = ws.free_idx[a];
-            double d = ws.rhs[a] - ws.U[idx];
-            if (d > 0.0 && ws.U[idx] + d > u_max) {
-                double a_cand = (u_max - ws.U[idx]) / d;
-                if (a_cand < alpha) alpha = a_cand;
-            } else if (d < 0.0 && ws.U[idx] + d < u_min) {
-                double a_cand = (u_min - ws.U[idx]) / d;
-                if (a_cand < alpha) alpha = a_cand;
-            }
-        }
-
-        // Apply step
-        for (int a = 0; a < n_free; ++a) {
-            int idx = ws.free_idx[a];
-            ws.U[idx] += alpha * (ws.rhs[a] - ws.U[idx]);
-        }
-
-        // Snap to bounds to avoid floating-point drift
-        clip_to_bounds(ws.U, n, u_min, u_max);
-
-        // (h) KKT check (only meaningful when full step was taken)
-        if (alpha >= 1.0 - 1.0e-14) {
-            // Recompute gradient at the new point
-            mpc_linalg::gemv(n, n, H, ws.U, ws.grad);
-            mpc_linalg::axpy(n, 1.0, g, ws.grad);
-
-            bool kkt_ok = true;
-            for (int j = 0; j < n_clamped; ++j) {
-                int ci = ws.clamped_idx[j];
-                bool at_lower = (ws.U[ci] <= u_min + BOUND_TOL);
-                bool at_upper = (ws.U[ci] >= u_max - BOUND_TOL);
-                if (at_lower && ws.grad[ci] < -KKT_TOL) { kkt_ok = false; break; }
-                if (at_upper && ws.grad[ci] >  KKT_TOL) { kkt_ok = false; break; }
-            }
-            if (kkt_ok)
-                break;
-        }
-    }
-
-    return iter + 1;  // number of iterations consumed (1-based)
 }
 
 // ---------------------------------------------------------------------------
