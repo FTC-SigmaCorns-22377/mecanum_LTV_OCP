@@ -1,4 +1,6 @@
 build/
 .claude/
+.vscode/
 build-android-a53/
 build-host-jni/
+trevors-docs/

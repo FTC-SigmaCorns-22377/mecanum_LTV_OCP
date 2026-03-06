@@ -21,7 +21,17 @@ PrecomputedWindow* mpc_precompute_all(const RefNode* ref_path, int n_path,
     const int N = config.N;
     PrecomputedWindow* windows = new PrecomputedWindow[n_windows];
 
-    // Temp arrays for discretization (heap-allocated since N can be up to 30)
+    // Precompute all interval discretizations once (instead of redundantly per-window)
+    const int n_intervals = n_path - 1;
+    double* all_A = new double[n_intervals * NX * NX];
+    double* all_B = new double[n_intervals * NX * NU];
+    for (int i = 0; i < n_intervals; ++i) {
+        exact_discretize(ref_path[i], ref_path[i + 1], params,
+                         all_A + i * NX * NX,
+                         all_B + i * NX * NU);
+    }
+
+    // Temp arrays for per-window condensing
     double* A_list = new double[N * NX * NX];
     double* B_list = new double[N * NX * NU];
     double* x_ref_consistent = new double[(N + 1) * NX];
@@ -30,12 +40,11 @@ PrecomputedWindow* mpc_precompute_all(const RefNode* ref_path, int n_path,
     double temp_Bu[NX];
 
     for (int start = 0; start < n_windows; ++start) {
-        // (a) Exact discretization for this window's horizon
+        // (a) Copy pre-discretized matrices for this window's horizon
         for (int k = 0; k < N; ++k) {
             int idx = start + k;
-            exact_discretize(ref_path[idx], ref_path[idx + 1], params,
-                             A_list + k * NX * NX,
-                             B_list + k * NX * NU);
+            std::memcpy(A_list + k * NX * NX, all_A + idx * NX * NX, NX * NX * sizeof(double));
+            std::memcpy(B_list + k * NX * NU, all_B + idx * NX * NU, NX * NU * sizeof(double));
         }
 
         // (b) Recompute dynamically-consistent reference (affine offset = 0)
@@ -74,6 +83,8 @@ PrecomputedWindow* mpc_precompute_all(const RefNode* ref_path, int n_path,
     }
 
     // Clean up temp arrays
+    delete[] all_A;
+    delete[] all_B;
     delete[] A_list;
     delete[] B_list;
     delete[] x_ref_consistent;
@@ -90,7 +101,7 @@ int mpc_save_windows(const char* filename, const PrecomputedWindow* windows,
     if (!fp) return -1;
 
     // Write header
-    MPCFileHeader header;
+    MPCFileHeader header{};
     header.magic = MPC_FILE_MAGIC;
     header.version = MPC_FILE_VERSION;
     header.n_windows = static_cast<uint32_t>(n_windows);
@@ -99,6 +110,7 @@ int mpc_save_windows(const char* filename, const PrecomputedWindow* windows,
     header.nu = static_cast<uint32_t>(NU);
     header.u_min = config.u_min;
     header.u_max = config.u_max;
+    header.dt = config.dt;
 
     if (std::fwrite(&header, sizeof(header), 1, fp) != 1) {
         std::fclose(fp);
@@ -143,6 +155,12 @@ int mpc_save_windows(const char* filename, const PrecomputedWindow* windows,
             std::fclose(fp);
             return -1;
         }
+
+        // lambda_max: 1 double (v2+)
+        if (std::fwrite(&windows[i].lambda_max, sizeof(double), 1, fp) != 1) {
+            std::fclose(fp);
+            return -1;
+        }
     }
 
     std::fclose(fp);
@@ -171,6 +189,7 @@ PrecomputedWindow* mpc_load_windows(const char* filename, int& n_windows_out,
     config_out.N = static_cast<int>(header.N);
     config_out.u_min = header.u_min;
     config_out.u_max = header.u_max;
+    config_out.dt = header.dt;
 
     int n_windows = static_cast<int>(header.n_windows);
     PrecomputedWindow* windows = new PrecomputedWindow[n_windows];
@@ -215,6 +234,13 @@ PrecomputedWindow* mpc_load_windows(const char* filename, int& n_windows_out,
         // x_ref_0: NX
         if (std::fread(windows[i].x_ref_0, sizeof(double), NX, fp)
             != static_cast<size_t>(NX)) {
+            delete[] windows;
+            std::fclose(fp);
+            return nullptr;
+        }
+
+        // lambda_max: 1 double (v2+)
+        if (std::fread(&windows[i].lambda_max, sizeof(double), 1, fp) != 1) {
             delete[] windows;
             std::fclose(fp);
             return nullptr;

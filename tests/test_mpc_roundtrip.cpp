@@ -497,6 +497,96 @@ static bool test_serialization_roundtrip()
 }
 
 // ---------------------------------------------------------------------------
+// Test 6: v2 serialization roundtrip (dt + lambda_max)
+// ---------------------------------------------------------------------------
+static bool test_v2_roundtrip()
+{
+    std::printf("Test 6: v2 roundtrip (dt + lambda_max) ... ");
+
+    ModelParams params = make_params();
+    MPCConfig   config = make_config();
+
+    const int n_path = 50;
+    RefNode path[50];
+    build_ref_path(path, n_path, config.dt);
+
+    int n_windows = 0;
+    PrecomputedWindow* windows = mpc_precompute_all(path, n_path, params,
+                                                     config, n_windows);
+
+    bool ok = true;
+
+    if (!windows || n_windows < 1) {
+        std::printf("\n  Precompute failed");
+        delete[] windows;
+        std::printf(" FAIL\n");
+        return false;
+    }
+
+    const char* filename = "/tmp/test_mpc_windows_v2.bin";
+
+    // Save
+    int save_ret = mpc_save_windows(filename, windows, n_windows, config);
+    if (save_ret != 0) {
+        std::printf("\n  mpc_save_windows returned %d", save_ret);
+        ok = false;
+    }
+
+    // Load
+    int n_loaded = 0;
+    MPCConfig config_loaded{};
+    PrecomputedWindow* loaded = mpc_load_windows(filename, n_loaded, config_loaded);
+
+    if (!loaded) {
+        std::printf("\n  mpc_load_windows returned null");
+        ok = false;
+    } else {
+        // Check dt survives roundtrip
+        if (std::fabs(config_loaded.dt - config.dt) > 1e-14) {
+            std::printf("\n  dt mismatch: loaded=%.6f, expected=%.6f",
+                        config_loaded.dt, config.dt);
+            ok = false;
+        }
+
+        // Check lambda_max survives roundtrip for all windows
+        for (int i = 0; i < n_loaded && i < n_windows; ++i) {
+            if (std::fabs(loaded[i].lambda_max - windows[i].lambda_max) > 1e-14) {
+                std::printf("\n  Window[%d] lambda_max mismatch: loaded=%.6e, expected=%.6e",
+                            i, loaded[i].lambda_max, windows[i].lambda_max);
+                ok = false;
+                break;
+            }
+        }
+
+        // Verify loaded windows produce identical solve results
+        if (n_loaded > 0 && ok) {
+            BoxQPWorkspace ws_orig{}, ws_loaded{};
+
+            double x0[NX];
+            std::memcpy(x0, path[0].x_ref, NX * sizeof(double));
+            x0[0] += 0.01;
+            x0[1] -= 0.005;
+
+            QPSolution sol_orig = mpc_solve_online(windows[0], x0, config, ws_orig);
+            QPSolution sol_loaded = mpc_solve_online(loaded[0], x0, config_loaded, ws_loaded);
+
+            double u_diff = mat_max_abs_diff(sol_orig.U, sol_loaded.U, windows[0].n_vars);
+            if (u_diff > 1e-12) {
+                std::printf("\n  Solve output differs: max_diff=%.3e", u_diff);
+                ok = false;
+            }
+        }
+
+        delete[] loaded;
+    }
+
+    std::remove(filename);
+    delete[] windows;
+    std::printf(" %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main()
@@ -509,6 +599,7 @@ int main()
     all_pass &= test_online_with_perturbation();
     all_pass &= test_closed_loop();
     all_pass &= test_serialization_roundtrip();
+    all_pass &= test_v2_roundtrip();
 
     std::printf("\n%s\n", all_pass ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     return all_pass ? 0 : 1;

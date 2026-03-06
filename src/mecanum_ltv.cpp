@@ -51,6 +51,32 @@ static void lerp_sample(const double* a, const double* b, double frac, double* o
     out[3] = a[3] + frac * dtheta;
 }
 
+int MecanumLTV::loadWindows(const char* filepath)
+{
+    // Free previous windows
+    delete[] windows_;
+    windows_ = nullptr;
+    n_windows_ = 0;
+    n_traj_windows_ = 0;
+    std::memset(&workspace_, 0, sizeof(workspace_));
+
+    MPCConfig loaded_config{};
+    int n_loaded = 0;
+    windows_ = mpc_load_windows(filepath, n_loaded, loaded_config);
+    if (!windows_ || n_loaded <= 0) {
+        windows_ = nullptr;
+        return 0;
+    }
+
+    n_windows_ = n_loaded;
+    n_traj_windows_ = n_loaded;
+    config_ = loaded_config;
+    params_set_ = true;   // not needed for solve, but mark as ready
+    config_set_ = true;
+
+    return n_windows_;
+}
+
 int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
 {
     if (!params_set_ || !config_set_)

@@ -83,17 +83,18 @@ struct BoxQPWorkspace {
 // Serialization header
 struct MPCFileHeader {
     uint32_t magic;       // 0x4D504351 ("MPCQ")
-    uint32_t version;     // 1
+    uint32_t version;     // 2
     uint32_t n_windows;
     uint32_t N;           // horizon
     uint32_t nx;
     uint32_t nu;
     double u_min;
     double u_max;
+    double dt;            // control timestep (v2+)
 };
 
 constexpr uint32_t MPC_FILE_MAGIC = 0x4D504351;
-constexpr uint32_t MPC_FILE_VERSION = 1;
+constexpr uint32_t MPC_FILE_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Heading-lookup LTV mode data structures
