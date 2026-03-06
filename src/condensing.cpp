@@ -2,6 +2,7 @@
 #include "cholesky.h"
 #include "blas_dispatch.h"
 
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 
@@ -181,6 +182,7 @@ void form_gradient_matrices(const double* Gamma, const double* Phi_blocks,
     // F = Gamma^T * Q_bar * Phi
     // Block row j of F (NU x NX):
     //   F_j = sum_{k=j+1}^{N-1} Gamma[k,j]^T * Q * Phi[k]  +  Gamma[N,j]^T * Qf * Phi[N]
+    static bool debug_once = true;
     for (int j = 0; j < N; ++j) {
         double* F_j = F + j * NU;   // F element (j*NU + l, s) = F[(j*NU + l) + n_vars * s]
 
@@ -190,13 +192,36 @@ void form_gradient_matrices(const double* Gamma, const double* Phi_blocks,
             const double* Qk = (k < N) ? Q : Qf;
 
             // Step 1: temp_qphi (NX x NX) = Qk * Phi[k]
-            mpc_linalg::gemm_full(NX, NX, NX, 1.0, Qk, NX, Phi_k, NX, 0.0, temp_qphi, NX);
+            // Use explicit loop to avoid BLASFEO dgemm_ panel-read bug on small matrices
+            for (int col = 0; col < NX; ++col) {
+                for (int row = 0; row < NX; ++row) {
+                    double sum = 0.0;
+                    for (int p = 0; p < NX; ++p)
+                        sum += Qk[row + NX * p] * Phi_k[p + NX * col];
+                    temp_qphi[row + NX * col] = sum;
+                }
+            }
 
             // Step 2: F_j (NU x NX) += Gamma[k,j]^T (NU x NX) * temp_qphi (NX x NX)
             // F_j is stored with leading dimension n_vars (rows of F)
             mpc_linalg::gemm_atb_full(NU, NX, NX, 1.0, Gk_j, gamma_rows, temp_qphi, NX, 1.0, F_j, n_vars);
+
+            if (debug_once) {
+                bool tq_nan = false, fj_nan = false;
+                for (int i = 0; i < NX * NX; ++i)
+                    if (std::isnan(temp_qphi[i])) { tq_nan = true; break; }
+                for (int c = 0; c < NX; ++c)
+                    for (int r = 0; r < NU; ++r)
+                        if (std::isnan(F_j[r + n_vars * c])) { fj_nan = true; break; }
+                if (tq_nan || fj_nan) {
+                    std::printf("  [form_grad] NaN at j=%d k=%d: temp_qphi=%s F_j=%s\n",
+                                j, k, tq_nan ? "NaN" : "ok", fj_nan ? "NaN" : "ok");
+                    debug_once = false;
+                }
+            }
         }
     }
+    debug_once = true;  // reset for next window
 
     // f_const = -H * u_ref_stacked
     // But we don't have H here directly. The caller (condense_window) will handle this.
@@ -225,6 +250,39 @@ void condense_window(const double* A_list, const double* B_list,
     // Build prediction matrices
     build_prediction_matrices(A_list, B_list, N, Phi_blocks, Gamma);
 
+    // DEBUG: check Phi and Gamma for NaN
+    {
+        static bool first_check = true;
+        if (first_check) {
+            first_check = false;
+            for (int k = 0; k <= N; ++k) {
+                const double* Phi_k = Phi_blocks + k * NX * NX;
+                for (int i = 0; i < NX * NX; ++i) {
+                    if (std::isnan(Phi_k[i])) {
+                        std::printf("  [condensing] Phi[%d] has NaN at element %d\n", k, i);
+                        break;
+                    }
+                }
+            }
+            int gamma_rows = (N + 1) * NX;
+            for (int k = 0; k <= N; ++k) {
+                for (int j = 0; j < k; ++j) {
+                    const double* Gk_j = Gamma + k * NX + (size_t)gamma_rows * j * NU;
+                    for (int i = 0; i < NX * NU; ++i) {
+                        int r = i % NX;
+                        int c = i / NX;
+                        double val = Gk_j[r + gamma_rows * c];
+                        if (std::isnan(val)) {
+                            std::printf("  [condensing] Gamma[%d,%d] has NaN\n", k, j);
+                            goto gamma_done;
+                        }
+                    }
+                }
+            }
+            gamma_done:;
+        }
+    }
+
     // Form Hessian: H = Gamma^T Q_bar Gamma + R_bar
     form_hessian(Gamma, config.Q, config.Qf, config.R, N, window.H);
 
@@ -237,6 +295,32 @@ void condense_window(const double* A_list, const double* B_list,
     // Form gradient matrices: F and f_const (f_const left as 0 by form_gradient_matrices)
     form_gradient_matrices(Gamma, Phi_blocks, config.Q, config.Qf,
                            x_ref_consistent, N, window.F, window.f_const);
+
+    // DEBUG: check F for NaN right after form_gradient_matrices
+    {
+        static bool first = true;
+        if (first) {
+            first = false;
+            int nan_count = 0;
+            for (int i = 0; i < n_vars * NX; ++i)
+                if (std::isnan(window.F[i])) nan_count++;
+            if (nan_count > 0)
+                std::printf("  [condensing] F has %d NaN after form_gradient_matrices\n", nan_count);
+
+            // Also check: is Phi still clean after form_hessian ran?
+            for (int k = 0; k <= N; ++k) {
+                const double* Phi_k = Phi_blocks + k * NX * NX;
+                for (int i = 0; i < NX * NX; ++i) {
+                    if (std::isnan(Phi_k[i])) {
+                        std::printf("  [condensing] Phi[%d] NOW has NaN at element %d (corrupted!)\n", k, i);
+                        goto phi_recheck_done;
+                    }
+                }
+            }
+            std::printf("  [condensing] Phi still clean after form_hessian+form_gradient\n");
+            phi_recheck_done:;
+        }
+    }
 
     // f_const = -H * u_ref_stacked
     // Stack u_ref into a contiguous vector of length n_vars

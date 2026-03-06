@@ -104,6 +104,7 @@ if(MPC_USE_HPIPM)
     set_target_properties(hpipm PROPERTIES
         IMPORTED_LOCATION ${EXTERNAL_INSTALL_PREFIX}/lib/libhpipm.a
         INTERFACE_INCLUDE_DIRECTORIES "${EXTERNAL_INSTALL_PREFIX}/include;${EXTERNAL_INSTALL_PREFIX}/include/hpipm"
+        INTERFACE_LINK_LIBRARIES blasfeo
     )
     add_dependencies(hpipm hpipm_ext)
 endif()
@@ -147,6 +148,8 @@ add_library(mecanum_mpc STATIC
     src/blas_dispatch.cpp
     src/mpc_solver_dispatch.cpp
     src/mecanum_ltv.cpp
+    # src/heading_lookup_offline.cpp
+    # src/heading_lookup_online.cpp
 )
 target_link_libraries(mecanum_mpc PUBLIC blasfeo m)
 target_include_directories(mecanum_mpc PUBLIC include/)
@@ -162,7 +165,7 @@ if(MPC_USE_NEON)
 endif()
 
 if(MPC_USE_HPIPM)
-    target_sources(mecanum_mpc PRIVATE src/hpipm_solver.cpp)
+    target_sources(mecanum_mpc PRIVATE src/hpipm_solver.cpp) #src/hpipm_ocp_solver.cpp)
     target_compile_definitions(mecanum_mpc PUBLIC MPC_USE_HPIPM=1)
     target_link_libraries(mecanum_mpc PUBLIC hpipm)
     target_include_directories(mecanum_mpc PUBLIC
@@ -212,6 +215,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_mpc_test(test_box_qp)
     add_mpc_test(test_mpc_roundtrip)
     add_mpc_test(test_timing)
+    #add_mpc_test(test_heading_lookup)
 
     # Rerun visualization tests (optional)
     if(MPC_ENABLE_RERUN)
@@ -234,5 +238,8 @@ if(NOT CMAKE_CROSSCOMPILING)
 
         add_executable(test_solver_comparison_rerun tests/test_solver_comparison_rerun.cpp)
         target_link_libraries(test_solver_comparison_rerun PRIVATE mecanum_mpc rerun_sdk nlohmann_json::nlohmann_json)
+
+        #add_executable(test_heading_noise_comparison_rerun tests/test_heading_noise_comparison_rerun.cpp)
+        #target_link_libraries(test_heading_noise_comparison_rerun PRIVATE mecanum_mpc rerun_sdk nlohmann_json::nlohmann_json)
     endif()
 endif()
