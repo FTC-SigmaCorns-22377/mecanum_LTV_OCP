@@ -27,6 +27,7 @@ void hpipm_ocp_workspace_init(HpipmOcpWorkspace& ws, int N)
     ws.N_alloc = N;
     ws.structures_created = false;
     ws.static_data_set = false;
+    ws.warm_valid = false;
     ws.dim = nullptr;
     ws.qp = nullptr;
     ws.sol = nullptr;
@@ -109,6 +110,8 @@ void hpipm_ocp_workspace_init(HpipmOcpWorkspace& ws, int N)
     align64(ptr);
     d_ocp_qp_ipm_arg_create(dim, arg, ptr);
     d_ocp_qp_ipm_arg_set_default(SPEED, arg);
+    int warm_start = 1;  // primal-only warm start (dual warm-start biases convergence near path end)
+    d_ocp_qp_ipm_arg_set_warm_start(&warm_start, arg);
     ptr += arg_size;
 
     align64(ptr);
@@ -233,6 +236,22 @@ int hpipm_ocp_qp_solve(const double* A_d, const double* B_list,
     d_ocp_qp_set_lbx(0, const_cast<double*>(x0), qp);
     d_ocp_qp_set_ubx(0, const_cast<double*>(x0), qp);
 
+    // Populate warm-start initial point
+    if (ws.warm_valid) {
+        // Controls: shift left, repeat last stage
+        for (int k = 0; k < N - 1; ++k)
+            d_ocp_qp_sol_set_u(k, ws.ws_u + (k + 1) * NU, sol);
+        d_ocp_qp_sol_set_u(N - 1, ws.ws_u + (N - 1) * NU, sol);
+
+        // States: shift left, repeat last stage (skip k=0: x0 is fixed by constraint)
+        for (int k = 1; k <= N - 1; ++k)
+            d_ocp_qp_sol_set_x(k, ws.ws_x + (k + 1) * NX, sol);
+        d_ocp_qp_sol_set_x(N, ws.ws_x + N * NX, sol);
+
+        // Dual variables (pi, lam) not warm-started: stale duals near path end
+        // cause IPM to converge to biased critical points. Primal-only is sufficient.
+    }
+
     // Solve
     d_ocp_qp_ipm_solve(qp, sol, arg, ipm_ws);
 
@@ -242,6 +261,14 @@ int hpipm_ocp_qp_solve(const double* A_d, const double* B_list,
         d_ocp_qp_sol_get_u(k, sol, u_k);
         std::memcpy(U_out + k * NU, u_k, NU * sizeof(double));
     }
+
+    // Cache primal solution for next warm start
+    for (int k = 0; k < N; ++k) {
+        d_ocp_qp_sol_get_u(k, sol, ws.ws_u + k * NU);
+        d_ocp_qp_sol_get_x(k, sol, ws.ws_x + k * NX);
+    }
+    d_ocp_qp_sol_get_x(N, sol, ws.ws_x + N * NX);
+    ws.warm_valid = true;
 
     int iter_count = 0;
     d_ocp_qp_ipm_get_iter(ipm_ws, &iter_count);

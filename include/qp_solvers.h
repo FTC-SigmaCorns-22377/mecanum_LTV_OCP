@@ -29,6 +29,11 @@ struct HpipmOcpWorkspace {
     bool structures_created;  // true after _create calls done
     bool static_data_set;     // true after Q/R/bounds set
     double cached_u_min, cached_u_max;
+
+    // Warm-start cache: primal solution from previous solve, shifted by 1 step
+    bool   warm_valid;
+    double ws_u[(N_MAX) * NU];          // controls  u[0..N-1]
+    double ws_x[(N_MAX + 1) * NX];     // states    x[0..N]
 };
 
 void hpipm_ocp_workspace_init(HpipmOcpWorkspace& ws, int N);
