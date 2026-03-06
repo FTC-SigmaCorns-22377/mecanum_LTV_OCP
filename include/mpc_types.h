@@ -120,6 +120,13 @@ struct HeadingTableData {
     double dt;
 };
 
+// Precomputed cost kernels for fast heading-lookup condensing
+struct HeadingKernelData {
+    double P[N_MAX * NX * NX];         // P[j] cost-to-go kernels, j=0..N-1
+    double G[N_MAX * NX * NX];         // G[j] = P[j] * A_d^(j+1), gradient kernels
+    int N;                              // horizon length
+};
+
 // Heading schedule configuration
 struct HeadingScheduleConfig {
     double alpha_0;        // max angular accel at zero ω (rad/s²)

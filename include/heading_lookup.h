@@ -66,3 +66,36 @@ QPSolution heading_table_solve_condensed(const HeadingTableData& table,
                                          const HeadingScheduleConfig& sched_config,
                                          QpSolverType solver_type,
                                          SolverContext& ctx);
+
+// ---------------------------------------------------------------------------
+// Kernel-based fast solve (precomputed cost-to-go kernels)
+// ---------------------------------------------------------------------------
+
+// Precompute cost kernels P[j], G[j] (offline, ~3μs)
+void heading_kernel_precompute(const HeadingLookupData& data,
+                                const MPCConfig& config,
+                                HeadingKernelData& kern);
+
+// Fast solve using precomputed kernels (for FISTA/HPIPM dense/qpOASES)
+QPSolution heading_lookup_solve_fast(const HeadingLookupData& data,
+                                     const HeadingKernelData& kern,
+                                     const RefNode* ref_window,
+                                     const double x0[NX],
+                                     const MPCConfig& config,
+                                     const HeadingScheduleConfig& sched_config,
+                                     QpSolverType solver_type,
+                                     SolverContext& ctx);
+
+// ---------------------------------------------------------------------------
+// HPIPM OCP direct solve (no condensing)
+// ---------------------------------------------------------------------------
+
+#ifdef MPC_USE_HPIPM
+// Direct OCP solve via HPIPM Riccati (no condensing at all)
+QPSolution heading_lookup_solve_ocp(const HeadingLookupData& data,
+                                    const RefNode* ref_window,
+                                    const double x0[NX],
+                                    const MPCConfig& config,
+                                    const HeadingScheduleConfig& sched_config,
+                                    SolverContext& ctx);
+#endif

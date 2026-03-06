@@ -99,6 +99,51 @@ double heading_lookup_precompute(const ModelParams& params, double dt,
 }
 
 // ---------------------------------------------------------------------------
+// Kernel precomputation: P[j] cost-to-go and G[j] gradient kernels
+// ---------------------------------------------------------------------------
+void heading_kernel_precompute(const HeadingLookupData& data,
+                                const MPCConfig& config,
+                                HeadingKernelData& kern)
+{
+    const int N = config.N;
+    kern.N = N;
+
+    const int nx2 = NX * NX;
+
+    // Backward Riccati for P[j]:
+    //   P[N-1] = Qf
+    //   P[j]   = Q + A_d^T · P[j+1] · A_d   for j = N-2 down to 0
+
+    // P[N-1] = Qf
+    std::memcpy(kern.P + (N - 1) * nx2, config.Qf, nx2 * sizeof(double));
+
+    double temp[NX * NX] = {};
+    for (int j = N - 2; j >= 0; --j) {
+        const double* Pjp1 = kern.P + (j + 1) * nx2;
+        double* Pj = kern.P + j * nx2;
+
+        // temp = P[j+1] · A_d
+        mpc_linalg::gemm(NX, NX, NX, Pjp1, data.A_d, temp);
+
+        // Pj = A_d^T · temp  (+ Q added below)
+        mpc_linalg::gemm_atb(NX, NX, NX, data.A_d, NX, temp, NX, Pj, NX);
+
+        // Pj += Q (diagonal add for diagonal Q, but handle general case)
+        for (int i = 0; i < nx2; ++i)
+            Pj[i] += config.Q[i];
+    }
+
+    // Forward pass for G[j] = P[j] · A_d^(j+1)
+    for (int j = 0; j < N; ++j) {
+        const double* Pj = kern.P + j * nx2;
+        const double* Ad_pow_jp1 = data.A_d_pow + (j + 1) * nx2;
+        double* Gj = kern.G + j * nx2;
+
+        mpc_linalg::gemm(NX, NX, NX, Pj, Ad_pow_jp1, Gj);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Heading table precomputation
 // ---------------------------------------------------------------------------
 void heading_table_precompute(const ModelParams& params, double dt, int M,

@@ -220,7 +220,7 @@ static void rk4_step(double* x, const double* u, double dt,
 // ---------------------------------------------------------------------------
 // Per-solver run state
 // ---------------------------------------------------------------------------
-enum class SolveMode { PRECOMPUTED, HL_TRIG, HL_TABLE };
+enum class SolveMode { PRECOMPUTED, HL_TRIG, HL_TABLE, OFFLINE_OCP, HL_TRIG_OCP };
 
 struct SolverRun {
     const char* name;
@@ -353,10 +353,11 @@ int main(int argc, char** argv)
     };
 
 #ifdef MPC_USE_HPIPM
-    solver_defs.push_back({"offline_hpipm",   QpSolverType::HPIPM,   SolveMode::PRECOMPUTED, rerun::Color(255, 100,  40)});
-    solver_defs.push_back({"hl_trig_hpipm",   QpSolverType::HPIPM,   SolveMode::HL_TRIG,    rerun::Color(255, 200,  80)});
-    solver_defs.push_back({"hl_table_hpipm",  QpSolverType::HPIPM,   SolveMode::HL_TABLE,   rerun::Color(180, 255, 200)});
-    solver_defs.push_back({"offline_hpipm_ocp",QpSolverType::HPIPM_OCP,SolveMode::PRECOMPUTED,rerun::Color(255, 140, 100)});
+    solver_defs.push_back({"offline_hpipm",     QpSolverType::HPIPM,     SolveMode::PRECOMPUTED,  rerun::Color(255, 100,  40)});
+    solver_defs.push_back({"hl_trig_hpipm",     QpSolverType::HPIPM,     SolveMode::HL_TRIG,      rerun::Color(255, 200,  80)});
+    solver_defs.push_back({"hl_table_hpipm",    QpSolverType::HPIPM,     SolveMode::HL_TABLE,     rerun::Color(180, 255, 200)});
+    solver_defs.push_back({"offline_hpipm_ocp", QpSolverType::HPIPM_OCP, SolveMode::OFFLINE_OCP,  rerun::Color(255, 140, 100)});
+    solver_defs.push_back({"hl_trig_hpipm_ocp", QpSolverType::HPIPM_OCP, SolveMode::HL_TRIG_OCP, rerun::Color(100, 255, 200)});
 #endif
 #ifdef MPC_USE_QPOASES
     solver_defs.push_back({"offline_qpoases", QpSolverType::QPOASES, SolveMode::PRECOMPUTED, rerun::Color(200,  80, 200)});
@@ -450,6 +451,58 @@ int main(int argc, char** argv)
                         hl_table, &ref_path[k], run.x_cur, config,
                         sched_config, run.type, run.ctx);
                     break;
+#ifdef MPC_USE_HPIPM
+                case SolveMode::OFFLINE_OCP: {
+                    // Re-discretize at reference headings, then solve via HPIPM OCP
+                    struct timespec t0, t1;
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+                    double A_list_ocp[N_MAX * NX * NX];
+                    double B_list_ocp[N_MAX * NX * NU];
+                    double x_ref_con[(N_MAX + 1) * NX];
+                    double u_ref_stk[N_MAX * NU];
+                    double tAx[NX], tBu[NX];
+
+                    for (int j = 0; j < config.N; ++j) {
+                        int idx = k + j;
+                        exact_discretize(ref_path[idx], ref_path[idx + 1], params,
+                                         A_list_ocp + j * NX * NX,
+                                         B_list_ocp + j * NX * NU);
+                    }
+
+                    std::memcpy(x_ref_con, ref_path[k].x_ref, NX * sizeof(double));
+                    for (int j = 0; j < config.N; ++j) {
+                        std::memcpy(u_ref_stk + j * NU, ref_path[k + j].u_ref, NU * sizeof(double));
+                        mpc_linalg::gemv(NX, NX, A_list_ocp + j * NX * NX, x_ref_con + j * NX, tAx);
+                        mpc_linalg::gemv(NX, NU, B_list_ocp + j * NX * NU, ref_path[k + j].u_ref, tBu);
+                        for (int i = 0; i < NX; ++i)
+                            x_ref_con[(j + 1) * NX + i] = tAx[i] + tBu[i];
+                    }
+
+                    std::memset(&sol, 0, sizeof(sol));
+                    sol.n_iterations = hpipm_ocp_qp_solve(
+                        A_list_ocp, B_list_ocp, config.Q, config.Qf, config.R,
+                        x_ref_con, u_ref_stk, run.x_cur,
+                        config.u_min, config.u_max, config.N,
+                        sol.U, run.ctx.hpipm_ocp_ws);
+                    std::memcpy(sol.u0, sol.U, NU * sizeof(double));
+
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+                    sol.solve_time_ns = (t1.tv_sec - t0.tv_sec) * 1e9
+                                      + (t1.tv_nsec - t0.tv_nsec);
+                    break;
+                }
+                case SolveMode::HL_TRIG_OCP:
+                    sol = heading_lookup_solve_ocp(
+                        hl_data, &ref_path[k], run.x_cur, config,
+                        sched_config, run.ctx);
+                    break;
+#else
+                case SolveMode::OFFLINE_OCP:
+                case SolveMode::HL_TRIG_OCP:
+                    std::memset(&sol, 0, sizeof(sol));
+                    break;
+#endif
             }
 
             double solve_us = sol.solve_time_ns / 1000.0;
@@ -516,9 +569,11 @@ int main(int argc, char** argv)
 
     auto mode_str = [](SolveMode m) -> const char* {
         switch (m) {
-            case SolveMode::PRECOMPUTED: return "offline";
-            case SolveMode::HL_TRIG:    return "hl_trig";
-            case SolveMode::HL_TABLE:   return "hl_table";
+            case SolveMode::PRECOMPUTED:  return "offline";
+            case SolveMode::HL_TRIG:      return "hl_trig";
+            case SolveMode::HL_TABLE:     return "hl_table";
+            case SolveMode::OFFLINE_OCP:  return "offline_ocp";
+            case SolveMode::HL_TRIG_OCP:  return "hl_trig_ocp";
         }
         return "?";
     };
