@@ -4,3 +4,5 @@ build/
 build-android-a53/
 build-host-jni/
 trevors-docs/
+.cache/
+compile_commands.json
