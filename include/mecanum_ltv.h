@@ -24,6 +24,9 @@ public:
     // HPIPM_OCP requires loadTrajectory (not loadWindows) and MPC_USE_HPIPM build.
     void setSolverType(QpSolverType type) { solver_type_ = type; }
 
+    // Set cost-based window selection tuning. Optional; defaults are reasonable.
+    void setWindowSelConfig(const WindowSelConfig& cfg) { win_sel_config_ = cfg; }
+
     // ---- Trajectory loading ----
 
     // Load a reference trajectory from raw state samples.
@@ -43,13 +46,25 @@ public:
     // Returns the number of windows loaded (0 on failure).
     int loadWindows(const char* filepath);
 
+    // Save precomputed windows to a .bin file (v2 format).
+    // Returns 0 on success, non-zero on failure.
+    int saveWindows(const char* filepath) const;
+
     // ---- Online solve ----
 
-    // Solve MPC at window index `window_idx` given current state x0[6].
+    // Solve MPC given current state x0[6] and time elapsed since the last solve call.
+    // On the first call after loadTrajectory/loadWindows, dt_since_last should be
+    // the total elapsed time since trajectory start.
     // Writes the full control horizon to u_out (N*4 doubles).
-    // Returns the number of QP iterations (0 = warm-start hit).
-    // Returns -1 on error (bad index, not precomputed).
-    int solve(int window_idx, const double x0[NX], double* u_out);
+    // Returns the selected window index (>=0). Returns -1 on error.
+    // Internally maintains prev_idx_ (monotone, never decreases).
+    int solve(const double x0[NX], double dt_since_last, double* u_out);
+
+    // Index selected by the most recent solve() call. Useful for logging.
+    int prevIdx() const { return prev_idx_; }
+
+    // Copy x_ref_0[NX] for window_idx into x_ref_out. Returns false on bad index.
+    bool getWindowRef(int window_idx, double x_ref_out[NX]) const;
 
     // ---- Accessors ----
 
@@ -84,4 +99,10 @@ private:
     // Solver context and type
     SolverContext solver_ctx_;
     QpSolverType solver_type_;
+
+    // Cost-based window selection state
+    WindowSelConfig win_sel_config_;
+    int    prev_idx_;
+    double elapsed_total_;  // seconds accumulated while on-path; drives time_idx_float
+    bool   was_holding_;    // true if the previous solve was in hold (off-path) mode
 };

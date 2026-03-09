@@ -4,8 +4,11 @@
 #include <cstring>
 #include <time.h>
 
+// Maximum delta for which warm-start shifting is attempted.
+static constexpr int MAX_WARM_SHIFT = 5;
+
 QPSolution mpc_solve_online(const PrecomputedWindow& window, const double x0[NX],
-                            const MPCConfig& config, BoxQPWorkspace& workspace)
+                            const MPCConfig& config, BoxQPWorkspace& workspace, int delta)
 {
     const int n_vars = window.n_vars;
 
@@ -28,12 +31,19 @@ QPSolution mpc_solve_online(const PrecomputedWindow& window, const double x0[NX]
     double step_size = 1.0 / window.lambda_max;
 
     // ---- Path A: try shifted warm-start ----
-    if (workspace.warm_valid && workspace.prev_n_vars == n_vars) {
-        // Shift previous solution by one timestep
-        for (int i = 0; i < n_vars - NU; ++i)
-            workspace.U[i] = workspace.U_prev[i + NU];
-        for (int i = n_vars - NU; i < n_vars; ++i)
-            workspace.U[i] = 0.0;
+    if (workspace.warm_valid && workspace.prev_n_vars == n_vars
+            && delta >= 0 && delta <= MAX_WARM_SHIFT) {
+        if (delta == 0) {
+            // Same window: reuse previous solution directly
+            std::memcpy(workspace.U, workspace.U_prev, static_cast<std::size_t>(n_vars) * sizeof(double));
+        } else {
+            // Shift by delta timesteps
+            const int shift = delta * NU;
+            for (int i = 0; i < n_vars - shift; ++i)
+                workspace.U[i] = workspace.U_prev[i + shift];
+            for (int i = n_vars - shift; i < n_vars; ++i)
+                workspace.U[i] = 0.0;
+        }
 
         // Accept if shifted solution satisfies KKT for the new QP
         if (is_feasible(workspace.U, n_vars, config.u_min, config.u_max) &&

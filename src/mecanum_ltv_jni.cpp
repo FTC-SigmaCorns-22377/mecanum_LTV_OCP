@@ -172,6 +172,58 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetConfig(
     from_handle(handle)->setConfig(cfg);
 }
 
+// void nativeSetWindowSelConfig(long handle,
+//   double posWeight, double timeWeight, double headingWeight,
+//   int searchRadius, int maxJump, double holdRadius)
+JNIEXPORT void JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetWindowSelConfig(
+    JNIEnv* env, jclass, jlong handle,
+    jdouble posWeight, jdouble timeWeight, jdouble headingWeight,
+    jint searchRadius, jint maxJump, jdouble holdRadius)
+{
+    if (!check_handle(env, handle)) return;
+
+    WindowSelConfig cfg{};
+    cfg.pos_weight     = posWeight;
+    cfg.time_weight    = timeWeight;
+    cfg.heading_weight = headingWeight;
+    cfg.search_radius  = searchRadius;
+    cfg.max_jump       = maxJump;
+    cfg.hold_radius    = holdRadius;
+
+    from_handle(handle)->setWindowSelConfig(cfg);
+}
+
+// int nativeSaveWindows(long handle, String filepath)
+JNIEXPORT jint JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSaveWindows(
+    JNIEnv* env, jclass, jlong handle, jstring filepath)
+{
+    if (!check_handle(env, handle)) return -1;
+    if (!filepath) {
+        throw_illegal_argument(env, "filepath is null");
+        return -1;
+    }
+
+    const char* path_cstr = env->GetStringUTFChars(filepath, nullptr);
+    if (!path_cstr) return -1;
+
+    int result = -1;
+    try {
+        result = from_handle(handle)->saveWindows(path_cstr);
+    } catch (const std::exception& e) {
+        env->ReleaseStringUTFChars(filepath, path_cstr);
+        throw_runtime(env, std::string("saveWindows failed: ") + e.what());
+        return -1;
+    } catch (...) {
+        env->ReleaseStringUTFChars(filepath, path_cstr);
+        throw_runtime(env, "saveWindows failed: unknown error");
+        return -1;
+    }
+    env->ReleaseStringUTFChars(filepath, path_cstr);
+    return result;
+}
+
 // int nativeLoadWindows(long handle, String filepath)
 JNIEXPORT jint JNICALL
 Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeLoadWindows(
@@ -234,12 +286,13 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeLoadTrajectory(
     return 0;
 }
 
-// int nativeSolve(long handle, int windowIdx, double[] x0, double[] uOut)
+// int nativeSolve(long handle, double dtSinceLast, double[] x0, double[] uOut)
 //   x0 is length 6, uOut is length N*4
+//   Returns the selected window index, or -1 on error.
 JNIEXPORT jint JNICALL
 Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSolve(
     JNIEnv* env, jclass, jlong handle,
-    jint windowIdx, jdoubleArray x0, jdoubleArray uOut)
+    jdouble dtSinceLast, jdoubleArray x0, jdoubleArray uOut)
 {
     if (!check_handle(env, handle)) return -1;
     if (!check_array(env, x0, NX, "x0")) return -1;
@@ -253,13 +306,40 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSolve(
     if (!x0_arr.valid() || !u_arr.valid()) return -1;
 
     try {
-        return ctrl->solve(windowIdx, x0_arr.data(), u_arr.data());
+        return ctrl->solve(x0_arr.data(), dtSinceLast, u_arr.data());
     } catch (const std::exception& e) {
         throw_runtime(env, std::string("solve failed: ") + e.what());
     } catch (...) {
         throw_runtime(env, "solve failed: unknown error");
     }
     return -1;
+}
+
+// boolean nativeGetWindowRef(long handle, int windowIdx, double[] xRefOut)
+//   Fills xRefOut[6] with x_ref_0 for the given window. Returns false on bad index.
+JNIEXPORT jboolean JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeGetWindowRef(
+    JNIEnv* env, jclass, jlong handle, jint windowIdx, jdoubleArray xRefOut)
+{
+    if (!check_handle(env, handle)) return JNI_FALSE;
+    if (!check_array(env, xRefOut, NX, "xRefOut")) return JNI_FALSE;
+
+    double x_ref[NX];
+    if (!from_handle(handle)->getWindowRef(windowIdx, x_ref))
+        return JNI_FALSE;
+
+    ScopedDoubleArray out(env, xRefOut, 0);  // writeback
+    if (!out.valid()) return JNI_FALSE;
+    std::memcpy(out.data(), x_ref, NX * sizeof(double));
+    return JNI_TRUE;
+}
+
+// int nativeGetPrevIdx(long handle)
+//   Returns the window index selected by the most recent solve() call.
+JNIEXPORT jint JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeGetPrevIdx(JNIEnv* env, jclass, jlong handle) {
+    if (!check_handle(env, handle)) return -1;
+    return from_handle(handle)->prevIdx();
 }
 
 // int nativeNumWindows(long handle)

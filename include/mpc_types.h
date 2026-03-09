@@ -97,6 +97,21 @@ constexpr uint32_t MPC_FILE_MAGIC = 0x4D504351;
 constexpr uint32_t MPC_FILE_VERSION = 2;
 
 // ---------------------------------------------------------------------------
+// Cost-based window selection config
+// ---------------------------------------------------------------------------
+
+struct WindowSelConfig {
+    double pos_weight     = 1.0;   // weight on position+heading distance squared
+    double time_weight    = 0.5;   // weight on (i - time_idx_float)^2
+    double heading_weight = 0.3;   // scale applied to dtheta in distance metric
+    int    search_radius  = 10;    // max windows to search forward from prev_idx
+    int    max_jump       = 5;     // hard cap on advance per solve call
+    double hold_radius    = 0.3;   // metres: if robot is farther than this from the current
+                                   // reference window, freeze the window (don't advance) and
+                                   // don't accumulate elapsed time until it re-approaches.
+};
+
+// ---------------------------------------------------------------------------
 // Heading-lookup LTV mode data structures
 // ---------------------------------------------------------------------------
 

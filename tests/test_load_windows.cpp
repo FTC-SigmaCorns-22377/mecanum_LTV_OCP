@@ -188,10 +188,15 @@ static bool test_load_windows_matches_direct()
         double u_direct[N_MAX * NU];
         double u_loaded[N_MAX * NU];
 
-        int test_indices[] = {0, n_direct / 2, n_direct - 1};
-        for (int idx : test_indices) {
-            int iters_direct = direct.solve(idx, x0, u_direct);
-            int iters_loaded = loaded.solve(idx, x0, u_loaded);
+        // Advance sequentially (one dt step per call) to respect the monotone
+        // prev_idx_ constraint. Compare direct vs loaded at each window.
+        int test_count = std::min(n_direct, 20);  // check first 20 windows
+        for (int idx = 0; idx < test_count; ++idx) {
+            // First call: dt_since_last = 0 (start of trajectory)
+            // Subsequent calls: advance by one dt step
+            double dt_since_last = (idx == 0) ? 0.0 : dt;
+            int iters_direct = direct.solve(x0, dt_since_last, u_direct);
+            int iters_loaded = loaded.solve(x0, dt_since_last, u_loaded);
 
             if (iters_direct < 0 || iters_loaded < 0) {
                 std::printf("\n  Solve failed at window %d (direct=%d, loaded=%d)",

@@ -21,6 +21,10 @@ MecanumLTV::MecanumLTV()
     , hld_valid_(false)
     , solver_ctx_{}
     , solver_type_(QpSolverType::FISTA)
+    , win_sel_config_{}
+    , prev_idx_(0)
+    , elapsed_total_(0.0)
+    , was_holding_(false)
 {
 }
 
@@ -62,6 +66,21 @@ static void lerp_sample(const double* a, const double* b, double frac, double* o
     out[3] = a[3] + frac * dtheta;
 }
 
+bool MecanumLTV::getWindowRef(int window_idx, double x_ref_out[NX]) const
+{
+    if (!windows_ || window_idx < 0 || window_idx >= n_windows_)
+        return false;
+    std::memcpy(x_ref_out, windows_[window_idx].x_ref_0, NX * sizeof(double));
+    return true;
+}
+
+int MecanumLTV::saveWindows(const char* filepath) const
+{
+    if (!windows_ || n_windows_ <= 0)
+        return -1;
+    return mpc_save_windows(filepath, windows_, n_windows_, config_);
+}
+
 int MecanumLTV::loadWindows(const char* filepath)
 {
     // Free previous windows and ref nodes
@@ -88,6 +107,9 @@ int MecanumLTV::loadWindows(const char* filepath)
     config_ = loaded_config;
     params_set_ = true;   // not needed for solve, but mark as ready
     config_set_ = true;
+    prev_idx_ = 0;
+    elapsed_total_ = 0.0;
+    was_holding_ = false;
 
     return n_windows_;
 }
@@ -195,6 +217,9 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
 
     // Store the index of the last real trajectory window for clamping
     n_traj_windows_ = n_resampled;
+    prev_idx_ = 0;
+    elapsed_total_ = 0.0;
+    was_holding_ = false;
 
     // Precompute heading-lookup LTV data for the HPIPM path
     heading_lookup_precompute(params_, config_.dt, hld_);
@@ -204,38 +229,109 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
     return n_windows_;
 }
 
-int MecanumLTV::solve(int window_idx, const double x0[NX], double* u_out)
+// ---------------------------------------------------------------------------
+// Angle wrapping helper
+// ---------------------------------------------------------------------------
+static double angle_wrap(double a)
 {
-    if (!windows_ || window_idx < 0)
+    while (a >  M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
+{
+    if (!windows_ || n_windows_ <= 0)
         return -1;
 
-    // Clamp to the last window once past the end of the trajectory.
-    // When clamped, freeze the warm-start so it doesn't shift.
-    bool clamped = (window_idx >= n_windows_);
-    int idx = clamped ? n_windows_ - 1 : window_idx;
+    const double dt_nominal = config_.dt;
 
-    if (clamped) {
-        // Invalidate warm-start so the solver does a cold start on the
-        // same final window every time, rather than shifting U_prev.
+    // ---- Hold check: freeze window when robot is too far off-path ----
+    // Compute XY distance from robot to the current reference window.
+    const double* cur_ref = windows_[prev_idx_].x_ref_0;
+    const double dx_hold  = x0[0] - cur_ref[0];
+    const double dy_hold  = x0[1] - cur_ref[1];
+    const double pos_dist = std::sqrt(dx_hold*dx_hold + dy_hold*dy_hold);
+
+    int window_idx;
+
+    if (pos_dist > win_sel_config_.hold_radius) {
+        // Off-path: hold at current window, do not accumulate elapsed time.
+        window_idx = prev_idx_;
+        was_holding_ = true;
+    } else {
+        // On-path: if we just transitioned in from holding, reset elapsed_total_
+        // so time_idx_float picks up cleanly from prev_idx_ with no accumulated debt.
+        if (was_holding_) {
+            elapsed_total_ = prev_idx_ * dt_nominal;
+            was_holding_ = false;
+        }
+        elapsed_total_ += dt_since_last;
+        const double time_idx_float = elapsed_total_ / dt_nominal;
+
+        // ---- Cost-based window selection ----
+        const int search_start = prev_idx_;
+        const int search_end   = std::min(prev_idx_ + win_sel_config_.search_radius,
+                                          n_windows_ - 1);
+
+        int cost_idx = search_start;
+        double best_cost = 1e18;
+        const double hw = win_sel_config_.heading_weight;
+
+        for (int i = search_start; i <= search_end; ++i) {
+            const double* ref = windows_[i].x_ref_0;
+            double dx     = x0[0] - ref[0];
+            double dy     = x0[1] - ref[1];
+            double dtheta = angle_wrap(x0[2] - ref[2]);
+            double dist2  = dx*dx + dy*dy + hw*hw*dtheta*dtheta;
+            double td     = static_cast<double>(i) - time_idx_float;
+            double cost   = win_sel_config_.pos_weight  * dist2
+                          + win_sel_config_.time_weight * td * td;
+            if (cost < best_cost) {
+                best_cost = cost;
+                cost_idx  = i;
+            }
+        }
+
+        // Snap to time if on/ahead of schedule, otherwise use position winner.
+        double time_delta = time_idx_float - static_cast<double>(cost_idx);
+        if (time_delta < 0.5) {
+            window_idx = static_cast<int>(std::round(time_idx_float));
+        } else {
+            window_idx = cost_idx;
+        }
+
+        // Clamp: monotone and max-jump cap
+        window_idx = std::max(prev_idx_,
+                              std::min(window_idx, prev_idx_ + win_sel_config_.max_jump));
+        window_idx = std::max(0, std::min(window_idx, n_windows_ - 1));
+    }
+
+    const int delta = window_idx - prev_idx_;
+    prev_idx_ = window_idx;
+
+    // ---- Clamping at end: freeze warm-start ----
+    if (window_idx >= n_windows_ - 1) {
         solver_ctx_.box_ws.warm_valid = false;
     }
 
 #ifdef MPC_USE_HPIPM
     if (solver_type_ == QpSolverType::HPIPM_OCP
             && hld_valid_ && ref_nodes_
-            && idx + config_.N + 1 <= n_ref_nodes_) {
-        if (clamped)
+            && window_idx + config_.N + 1 <= n_ref_nodes_) {
+        if (window_idx >= n_windows_ - 1)
             solver_ctx_.hpipm_ocp_ws.warm_valid = false;
         QPSolution sol = heading_lookup_solve_ocp(
-            hld_, ref_nodes_ + idx, x0, config_, sched_config_, solver_ctx_);
+            hld_, ref_nodes_ + window_idx, x0, config_, sched_config_, solver_ctx_);
         std::memcpy(u_out, sol.U,
                     static_cast<std::size_t>(config_.N * NU) * sizeof(double));
-        return sol.n_iterations;
+        return window_idx;
     }
 #endif
 
-    QPSolution sol = mpc_solve_online(windows_[idx], x0, config_, solver_ctx_.box_ws);
-    const int n_vars = windows_[idx].n_vars;
+    QPSolution sol = mpc_solve_online(windows_[window_idx], x0, config_,
+                                      solver_ctx_.box_ws, delta);
+    const int n_vars = windows_[window_idx].n_vars;
     std::memcpy(u_out, sol.U, n_vars * sizeof(double));
-    return sol.n_iterations;
+    return window_idx;
 }
