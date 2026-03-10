@@ -81,39 +81,6 @@ int MecanumLTV::saveWindows(const char* filepath) const
     return mpc_save_windows(filepath, windows_, n_windows_, config_);
 }
 
-int MecanumLTV::loadWindows(const char* filepath)
-{
-    // Free previous windows and ref nodes
-    delete[] windows_;
-    windows_ = nullptr;
-    n_windows_ = 0;
-    n_traj_windows_ = 0;
-    delete[] ref_nodes_;
-    ref_nodes_ = nullptr;
-    n_ref_nodes_ = 0;
-    hld_valid_ = false;
-    std::memset(&solver_ctx_, 0, sizeof(solver_ctx_));
-
-    MPCConfig loaded_config{};
-    int n_loaded = 0;
-    windows_ = mpc_load_windows(filepath, n_loaded, loaded_config);
-    if (!windows_ || n_loaded <= 0) {
-        windows_ = nullptr;
-        return 0;
-    }
-
-    n_windows_ = n_loaded;
-    n_traj_windows_ = n_loaded;
-    config_ = loaded_config;
-    params_set_ = true;   // not needed for solve, but mark as ready
-    config_set_ = true;
-    prev_idx_ = 0;
-    elapsed_total_ = 0.0;
-    was_holding_ = false;
-
-    return n_windows_;
-}
-
 int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
 {
     if (!params_set_ || !config_set_)
