@@ -224,43 +224,6 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSaveWindows(
     return result;
 }
 
-// int nativeLoadWindows(long handle, String filepath)
-JNIEXPORT jint JNICALL
-Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeLoadWindows(
-    JNIEnv* env, jclass, jlong handle, jstring filepath)
-{
-    if (!check_handle(env, handle)) return 0;
-    if (!filepath) {
-        throw_illegal_argument(env, "filepath is null");
-        return 0;
-    }
-
-    const char* path_cstr = env->GetStringUTFChars(filepath, nullptr);
-    if (!path_cstr) return 0;
-
-    int result = 0;
-    try {
-        result = from_handle(handle)->loadWindows(path_cstr);
-    } catch (const std::exception& e) {
-        env->ReleaseStringUTFChars(filepath, path_cstr);
-        throw_runtime(env, std::string("loadWindows failed: ") + e.what());
-        return 0;
-    } catch (...) {
-        env->ReleaseStringUTFChars(filepath, path_cstr);
-        throw_runtime(env, "loadWindows failed: unknown error");
-        return 0;
-    }
-    env->ReleaseStringUTFChars(filepath, path_cstr);
-    return result;
-}
-
-// double nativeDt(long handle)
-JNIEXPORT jdouble JNICALL
-Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeDt(JNIEnv* env, jclass, jlong handle) {
-    if (!check_handle(env, handle)) return 0.0;
-    return from_handle(handle)->dt();
-}
-
 // int nativeLoadTrajectory(long handle, double[] samples, int nSamples, double dt)
 //   samples is flat [t, px, py, theta, vx, vy, omega, ...] with 7 doubles per sample
 JNIEXPORT jint JNICALL

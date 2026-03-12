@@ -6,7 +6,6 @@ include(ExternalProject)
 
 option(MPC_USE_NEON "Use custom NEON kernels for online linear algebra" OFF)
 option(MPC_BUILD_JNI "Build JNI shared library (requires JDK)" OFF)
-option(MPC_BUILD_CLI "Build CLI precomputation tool (mpc_precompute)" OFF)
 option(MPC_ENABLE_RERUN "Enable Rerun visualization for tests" OFF)
 option(MPC_USE_HPIPM "Enable HPIPM OCP solver" OFF)
 
@@ -174,27 +173,6 @@ elseif(MPC_BUILD_JNI)
 endif()
 
 # ---------------------------------------------------------------------------
-# Shared: fetch nlohmann_json if needed by CLI or Rerun tests
-# ---------------------------------------------------------------------------
-if(MPC_BUILD_CLI OR MPC_ENABLE_RERUN)
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
-endif()
-
-# ---------------------------------------------------------------------------
-# CLI precomputation tool
-# ---------------------------------------------------------------------------
-if(MPC_BUILD_CLI)
-    add_executable(mpc_precompute src/mpc_precompute_main.cpp)
-    target_link_libraries(mpc_precompute PRIVATE mecanum_mpc nlohmann_json::nlohmann_json)
-endif()
-
-# ---------------------------------------------------------------------------
 # Tests (skip when cross-compiling — can't run on host)
 # ---------------------------------------------------------------------------
 if(NOT CMAKE_CROSSCOMPILING)
@@ -211,7 +189,6 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_mpc_test(test_cholesky)
     add_mpc_test(test_box_qp)
     add_mpc_test(test_mpc_roundtrip)
-    add_mpc_test(test_load_windows)
     add_mpc_test(test_timing)
     add_mpc_test(test_heading_lookup)
 
@@ -224,7 +201,12 @@ if(NOT CMAKE_CROSSCOMPILING)
             URL https://github.com/rerun-io/rerun/releases/download/0.25.1/rerun_cpp_sdk.zip
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        FetchContent_MakeAvailable(rerun_sdk)
+        FetchContent_Declare(
+            nlohmann_json
+            URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(rerun_sdk nlohmann_json)
 
         add_executable(test_trajopt_rerun tests/test_trajopt_rerun.cpp)
         target_link_libraries(test_trajopt_rerun PRIVATE mecanum_mpc rerun_sdk nlohmann_json::nlohmann_json)
