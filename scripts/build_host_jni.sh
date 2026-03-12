@@ -115,6 +115,8 @@ cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DBLASFEO_TARGET="${BLASFEO_TARGET}" \
     -DMPC_BUILD_JNI=ON \
     -DMPC_USE_HPIPM=ON \
+    -DCMAKE_C_FLAGS="-march=native" \
+    -DCMAKE_CXX_FLAGS="-march=native" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 cmake --build "${BUILD_DIR}" --parallel "${PARALLEL_JOBS}"
