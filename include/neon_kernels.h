@@ -42,5 +42,32 @@ inline float32x4x3_t ATSdinvA(
 inline float32x4x3_t recurse(float32x4x3_t P, float32x4_t A, float32x4x3_t B, float32x4_t q, std::array<float, 6> Q, std::array<float, 4> R);
 void neon_full(std::array<float, 6> Q,std::array<float, 4> R, std::array<float, 3> A, std::array<float, 12> B, int N, const float* theta);
 
+// Tracking LQR via affine Riccati recursion (backward + forward pass).
+// Produces the optimal control sequence u* for the affine system:
+//   x_{k+1} = A x_k + B_k u_k + c_k
+// minimizing:
+//   sum (x_k - xr_k)^T Q (x_k - xr_k) + (u_k - ur_k)^T R (u_k - ur_k)
+//
+// B_k = M(theta_k) * B0 where M is a 3x3 rotation (heading-dependent).
+// Only the upper 3 states (positions) are tracked through the recursion;
+// lower 3 states contribute constant Q[3:5] cost via the P structure.
+//
+// xr_upper: [N+1][3] reference positions (row-major, includes terminal)
+// ur:       [N][4]   reference inputs (row-major)
+// c_upper:  [N][3]   affine offsets for upper 3 states (row-major)
+// x0_upper: [3]      initial upper state
+// u_star:   [N][4]   output optimal controls (row-major)
+void riccati_tracking(
+    std::array<float, 6> Q,
+    std::array<float, 4> R,
+    std::array<float, 3> A,
+    std::array<float, 12> B0,
+    int N,
+    const float* theta,
+    const float* xr_upper,
+    const float* ur,
+    const float* c_upper,
+    const float* x0_upper,
+    float* u_star);
 
 #endif

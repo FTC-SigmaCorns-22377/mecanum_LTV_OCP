@@ -466,6 +466,239 @@ inline float32x4x4_t cholesky4_from_rows(
     return float32x4x4_t { i0,i1,i2,i3 };
 }
 
+void riccati_tracking(
+    std::array<float, 6> Q,
+    std::array<float, 4> R,
+    std::array<float, 3> A,
+    std::array<float, 12> B0,
+    int N,
+    const float* theta,
+    const float* xr_upper,
+    const float* ur,
+    const float* c_upper,
+    const float* x0_upper,
+    float* u_star)
+{
+    // ---- Constants ----
+    float32x4_t a = { A[0], A[1], A[2], 1.0f };
+
+    float32x4_t b0_body = vld1q_f32(B0.data());
+    float32x4_t b1_body = vld1q_f32(B0.data() + 4);
+    float32x4_t b2_body = vld1q_f32(B0.data() + 8);
+
+    float32x4_t R_vec = { R[0], R[1], R[2], R[3] };
+
+    // Per-step storage: K (3 columns, each 4-wide) + v (4-wide) = 16 floats
+    // Layout: [K_col0(4) | K_col1(4) | K_col2(4) | v(4)] per step
+    std::vector<float> gains(N * 16);
+    // Also store rotated B per step for forward pass
+    std::vector<float> B_rotated(N * 12);
+
+    // ---- Terminal condition ----
+    // P_N = Q, p_N = -Q * xr_N
+    // Lane 3 holds p_upper_i = -Q[i] * xr_N[i]
+    const float* xr_N = xr_upper + N * 3;
+    float32x4_t p0 = { Q[0], 0.0f, 0.0f, -Q[0] * xr_N[0] };
+    float32x4_t p1 = { 0.0f, Q[1], 0.0f, -Q[1] * xr_N[1] };
+    float32x4_t p2 = { 0.0f, 0.0f, Q[2], -Q[2] * xr_N[2] };
+
+    // ---- Backward pass ----
+    for (int k = N - 1; k >= 0; k--) {
+        const float* xr_k = xr_upper + k * 3;
+        const float* ur_k = ur + k * 4;
+        const float* c_k  = c_upper + k * 3;
+
+        // 1. Rotate B
+        float ct = cosf(theta[k]);
+        float st = sinf(theta[k]);
+        float32x4_t ct_v = vdupq_n_f32(ct);
+        float32x4_t st_v = vdupq_n_f32(st);
+
+        float32x4_t b0 = vfmsq_f32(vmulq_f32(ct_v, b0_body), st_v, b1_body);
+        float32x4_t b1 = vfmaq_f32(vmulq_f32(st_v, b0_body), ct_v, b1_body);
+        float32x4_t b2 = b2_body;
+
+        // Store rotated B for forward pass
+        vst1q_f32(B_rotated.data() + k * 12 + 0, b0);
+        vst1q_f32(B_rotated.data() + k * 12 + 4, b1);
+        vst1q_f32(B_rotated.data() + k * 12 + 8, b2);
+
+        // 2. PB = P_uu * B_u  (uses lanes 0-2 of p rows)
+        float32x4_t pb0 = vmulq_laneq_f32(b0, p0, 0);
+        pb0 = vfmaq_laneq_f32(pb0, b1, p0, 1);
+        pb0 = vfmaq_laneq_f32(pb0, b2, p0, 2);
+
+        float32x4_t pb1 = vmulq_laneq_f32(b0, p1, 0);
+        pb1 = vfmaq_laneq_f32(pb1, b1, p1, 1);
+        pb1 = vfmaq_laneq_f32(pb1, b2, p1, 2);
+
+        float32x4_t pb2 = vmulq_laneq_f32(b0, p2, 0);
+        pb2 = vfmaq_laneq_f32(pb2, b1, p2, 1);
+        pb2 = vfmaq_laneq_f32(pb2, b2, p2, 2);
+
+        // 3. Lambda = P_uu c + p_upper via 4th-lane trick
+        float32x4_t c_ext = { c_k[0], c_k[1], c_k[2], 1.0f };
+        float L0 = vaddvq_f32(vmulq_f32(p0, c_ext));
+        float L1 = vaddvq_f32(vmulq_f32(p1, c_ext));
+        float L2 = vaddvq_f32(vmulq_f32(p2, c_ext));
+
+        // 4. B^T PB  (4x4 symmetric)
+        float32x4_t btpb0 = vmulq_laneq_f32(pb0, b0, 0);
+        btpb0 = vfmaq_laneq_f32(btpb0, pb1, b1, 0);
+        btpb0 = vfmaq_laneq_f32(btpb0, pb2, b2, 0);
+
+        float32x4_t btpb1 = vmulq_laneq_f32(pb0, b0, 1);
+        btpb1 = vfmaq_laneq_f32(btpb1, pb1, b1, 1);
+        btpb1 = vfmaq_laneq_f32(btpb1, pb2, b2, 1);
+
+        float32x4_t btpb2 = vmulq_laneq_f32(pb0, b0, 2);
+        btpb2 = vfmaq_laneq_f32(btpb2, pb1, b1, 2);
+        btpb2 = vfmaq_laneq_f32(btpb2, pb2, b2, 2);
+
+        float32x4_t btpb3 = vmulq_laneq_f32(pb0, b0, 3);
+        btpb3 = vfmaq_laneq_f32(btpb3, pb1, b1, 3);
+        btpb3 = vfmaq_laneq_f32(btpb3, pb2, b2, 3);
+
+        // 5. Cholesky factorize S = BTPB + R, get explicit inverse
+        float32x4x4_t Cinv = cholesky4_from_rows(btpb0, btpb1, btpb2, btpb3, R);
+
+        // 6. invBt = S^{-1} B^T  (column by column: invBt_i = Cinv * b_i_transposed)
+        float32x4_t invBt0 = vmulq_laneq_f32(Cinv.val[0], b0, 0);
+        invBt0 = vfmaq_laneq_f32(invBt0, Cinv.val[1], b0, 1);
+        invBt0 = vfmaq_laneq_f32(invBt0, Cinv.val[2], b0, 2);
+        invBt0 = vfmaq_laneq_f32(invBt0, Cinv.val[3], b0, 3);
+
+        float32x4_t invBt1 = vmulq_laneq_f32(Cinv.val[0], b1, 0);
+        invBt1 = vfmaq_laneq_f32(invBt1, Cinv.val[1], b1, 1);
+        invBt1 = vfmaq_laneq_f32(invBt1, Cinv.val[2], b1, 2);
+        invBt1 = vfmaq_laneq_f32(invBt1, Cinv.val[3], b1, 3);
+
+        float32x4_t invBt2 = vmulq_laneq_f32(Cinv.val[0], b2, 0);
+        invBt2 = vfmaq_laneq_f32(invBt2, Cinv.val[1], b2, 1);
+        invBt2 = vfmaq_laneq_f32(invBt2, Cinv.val[2], b2, 2);
+        invBt2 = vfmaq_laneq_f32(invBt2, Cinv.val[3], b2, 3);
+
+        // 7. PA = P * a (element-wise), then K columns = invBt * PA
+        float32x4_t pa0 = vmulq_f32(p0, a);
+        float32x4_t pa1 = vmulq_f32(p1, a);
+        float32x4_t pa2 = vmulq_f32(p2, a);
+
+        float32x4_t K_col0 = vmulq_laneq_f32(invBt0, pa0, 0);
+        K_col0 = vfmaq_laneq_f32(K_col0, invBt1, pa1, 0);
+        K_col0 = vfmaq_laneq_f32(K_col0, invBt2, pa2, 0);
+
+        float32x4_t K_col1 = vmulq_laneq_f32(invBt0, pa0, 1);
+        K_col1 = vfmaq_laneq_f32(K_col1, invBt1, pa1, 1);
+        K_col1 = vfmaq_laneq_f32(K_col1, invBt2, pa2, 1);
+
+        float32x4_t K_col2 = vmulq_laneq_f32(invBt0, pa0, 2);
+        K_col2 = vfmaq_laneq_f32(K_col2, invBt1, pa1, 2);
+        K_col2 = vfmaq_laneq_f32(K_col2, invBt2, pa2, 2);
+
+        // 8. z = S^{-1} B^T lambda = invBt * lambda
+        float32x4_t z = vmulq_n_f32(invBt0, L0);
+        z = vfmaq_n_f32(z, invBt1, L1);
+        z = vfmaq_n_f32(z, invBt2, L2);
+
+        // 9. v = z - S^{-1} R ur
+        float32x4_t ur_v = vld1q_f32(ur_k);
+        float32x4_t Rur = vmulq_f32(R_vec, ur_v);
+        float32x4_t Cinv_Rur = vmulq_laneq_f32(Cinv.val[0], Rur, 0);
+        Cinv_Rur = vfmaq_laneq_f32(Cinv_Rur, Cinv.val[1], Rur, 1);
+        Cinv_Rur = vfmaq_laneq_f32(Cinv_Rur, Cinv.val[2], Rur, 2);
+        Cinv_Rur = vfmaq_laneq_f32(Cinv_Rur, Cinv.val[3], Rur, 3);
+        float32x4_t v = vsubq_f32(z, Cinv_Rur);
+
+        // Store K and v for forward pass
+        float* g = gains.data() + k * 16;
+        vst1q_f32(g + 0,  K_col0);
+        vst1q_f32(g + 4,  K_col1);
+        vst1q_f32(g + 8,  K_col2);
+        vst1q_f32(g + 12, v);
+
+        // 10. Schur complement entries (upper triangle)
+        float32x4_t atpb0 = vmulq_laneq_f32(pb0, a, 0);
+        float32x4_t atpb1 = vmulq_laneq_f32(pb1, a, 1);
+        float32x4_t atpb2 = vmulq_laneq_f32(pb2, a, 2);
+
+        float sc00 = vaddvq_f32(vmulq_f32(atpb0, K_col0));
+        float sc01 = vaddvq_f32(vmulq_f32(atpb0, K_col1));
+        float sc02 = vaddvq_f32(vmulq_f32(atpb0, K_col2));
+        float sc11 = vaddvq_f32(vmulq_f32(atpb1, K_col1));
+        float sc12 = vaddvq_f32(vmulq_f32(atpb1, K_col2));
+        float sc22 = vaddvq_f32(vmulq_f32(atpb2, K_col2));
+
+        // 11. d = ATPB * z (for affine p update)
+        float d0 = vaddvq_f32(vmulq_f32(atpb0, z));
+        float d1 = vaddvq_f32(vmulq_f32(atpb1, z));
+        float d2 = vaddvq_f32(vmulq_f32(atpb2, z));
+
+        // 12. ATPA = DSD(P, a)  — lane 3 gives a_i * p_upper_i
+        float32x4_t ATPA0 = vmulq_f32(pa0, a);
+        float32x4_t ATPA1 = vmulq_f32(pa1, a);
+        float32x4_t ATPA2 = vmulq_f32(pa2, a);
+
+        // 13. Construct correction f
+        // Lanes 0-2: Q_combined - Schur
+        // Lane 3: f3_i = -(Q[i]+Q[3+i])*xr[i] + a[i]*(L_i - p_upper_i) - d_i
+        //   where (L_i - p_upper_i) = (P_uu * c)_i
+        float p_upper_0 = vgetq_lane_f32(p0, 3);
+        float p_upper_1 = vgetq_lane_f32(p1, 3);
+        float p_upper_2 = vgetq_lane_f32(p2, 3);
+
+        float f3_0 = -(Q[0] + Q[3]) * xr_k[0] + A[0] * (L0 - p_upper_0) - d0;
+        float f3_1 = -(Q[1] + Q[4]) * xr_k[1] + A[1] * (L1 - p_upper_1) - d1;
+        float f3_2 = -(Q[2] + Q[5]) * xr_k[2] + A[2] * (L2 - p_upper_2) - d2;
+
+        float32x4_t f0 = { Q[0] + Q[3] - sc00, -sc01,              -sc02,              f3_0 };
+        float32x4_t f1 = { -sc01,               Q[1] + Q[4] - sc11, -sc12,              f3_1 };
+        float32x4_t f2 = { -sc02,               -sc12,               Q[2] + Q[5] - sc22, f3_2 };
+
+        // 14. P_new = ATPA + f
+        p0 = vaddq_f32(ATPA0, f0);
+        p1 = vaddq_f32(ATPA1, f1);
+        p2 = vaddq_f32(ATPA2, f2);
+    }
+
+    // ---- Forward pass ----
+    float x0 = x0_upper[0];
+    float x1 = x0_upper[1];
+    float x2 = x0_upper[2];
+
+    for (int k = 0; k < N; k++) {
+        const float* g = gains.data() + k * 16;
+        float32x4_t K_col0 = vld1q_f32(g + 0);
+        float32x4_t K_col1 = vld1q_f32(g + 4);
+        float32x4_t K_col2 = vld1q_f32(g + 8);
+        float32x4_t v      = vld1q_f32(g + 12);
+
+        // u = -(K_col0*x0 + K_col1*x1 + K_col2*x2) - v
+        float32x4_t u_k = vnegq_f32(vfmaq_n_f32(
+            vfmaq_n_f32(vmulq_n_f32(K_col0, x0), K_col1, x1),
+            K_col2, x2));
+        u_k = vsubq_f32(u_k, v);
+
+        // Clamp to [-1, 1]
+        u_k = vmaxq_f32(vminq_f32(u_k, vdupq_n_f32(1.0f)), vdupq_n_f32(-1.0f));
+
+        vst1q_f32(u_star + k * 4, u_k);
+
+        // Propagate state: x_upper_{k+1} = D_u * x_upper + B_u * u + c_upper
+        float32x4_t b0_k = vld1q_f32(B_rotated.data() + k * 12 + 0);
+        float32x4_t b1_k = vld1q_f32(B_rotated.data() + k * 12 + 4);
+        float32x4_t b2_k = vld1q_f32(B_rotated.data() + k * 12 + 8);
+
+        float Bu0 = vaddvq_f32(vmulq_f32(b0_k, u_k));
+        float Bu1 = vaddvq_f32(vmulq_f32(b1_k, u_k));
+        float Bu2 = vaddvq_f32(vmulq_f32(b2_k, u_k));
+
+        const float* c_k = c_upper + k * 3;
+        x0 = A[0] * x0 + Bu0 + c_k[0];
+        x1 = A[1] * x1 + Bu1 + c_k[1];
+        x2 = A[2] * x2 + Bu2 + c_k[2];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // y = A * x,  A is m x n column-major
 // A[i + m*j] is element (i,j).
