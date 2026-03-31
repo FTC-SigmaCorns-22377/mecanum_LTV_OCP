@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(mecanum_mpc LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
-
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(ExternalProject)
 
 option(MPC_USE_NEON "Use custom NEON kernels for online linear algebra" OFF)
@@ -140,8 +140,8 @@ target_link_libraries(mecanum_mpc PUBLIC blasfeo m)
 target_include_directories(mecanum_mpc PUBLIC include/)
 
 if(MPC_USE_NEON)
-    #target_sources(mecanum_mpc PRIVATE src/neon_kernels.cpp)
-    #target_compile_definitions(mecanum_mpc PUBLIC MPC_USE_NEON=1)
+    target_sources(mecanum_mpc PRIVATE src/neon_kernels.cpp)
+    target_compile_definitions(mecanum_mpc PUBLIC MPC_USE_NEON=1)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         # AArch64: NEON always available
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
