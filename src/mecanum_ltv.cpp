@@ -1,4 +1,5 @@
 #include "mecanum_ltv.h"
+#include "ipm_solver.h"
 #include "mpc_offline.h"
 #include "mpc_online.h"
 
@@ -19,6 +20,8 @@ MecanumLTV::MecanumLTV()
     , hld_{}
     , sched_config_{}
     , hld_valid_(false)
+    , euler_data_{}
+    , euler_valid_(false)
     , solver_ctx_{}
     , solver_type_(QpSolverType::FISTA)
     , win_sel_config_{}
@@ -313,6 +316,23 @@ int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
     // ---- Clamping at end: freeze warm-start ----
     if (window_idx >= n_windows_ - 1) {
         solver_ctx_.box_ws.warm_valid = false;
+    }
+
+    if (solver_type_ == QpSolverType::NEON_IPM
+            && ref_nodes_
+            && window_idx + config_.N + 1 <= n_ref_nodes_) {
+        if (!euler_valid_) {
+            euler_dynamics_precompute(params_, config_.dt, euler_data_);
+            euler_valid_ = true;
+        }
+        if (window_idx >= n_windows_ - 1)
+            solver_ctx_.ipm_ws->warm_valid = false;
+        QPSolution sol = heading_lookup_solve_ipm(
+            euler_data_, hld_, ref_nodes_ + window_idx, x0, config_,
+            sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws);
+        std::memcpy(u_out, sol.U,
+                    static_cast<std::size_t>(config_.N * NU) * sizeof(double));
+        return window_idx;
     }
 
 #ifdef MPC_USE_HPIPM

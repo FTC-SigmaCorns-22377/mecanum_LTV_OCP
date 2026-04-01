@@ -1,4 +1,5 @@
 #include "qp_solvers.h"
+#include "ipm_solver.h"
 #include "blas_dispatch.h"
 #include "box_qp_solver.h"
 #include <cstring>
@@ -17,6 +18,10 @@ void solver_context_init(SolverContext& ctx, int n)
     // OCP workspace is lazily initialized on first use
 #endif
 
+    ctx.ipm_ws = new IpmWorkspace();
+    ipm_workspace_init(*ctx.ipm_ws);
+    ctx.ipm_config = new IpmSolverConfig(ipm_solver_default_config());
+
     (void)n;  // suppress unused warning when no optional solvers
 }
 
@@ -26,7 +31,10 @@ void solver_context_free(SolverContext& ctx)
     hpipm_ocp_workspace_free(ctx.hpipm_ocp_ws);
 #endif
 
-    (void)ctx;
+    delete ctx.ipm_ws;
+    ctx.ipm_ws = nullptr;
+    delete ctx.ipm_config;
+    ctx.ipm_config = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +106,9 @@ QPSolution mpc_solve_with_solver(const PrecomputedWindow& window,
     }
 
     case QpSolverType::HPIPM_OCP:
-        // HPIPM OCP is called directly from heading_lookup_online, not through
-        // this condensed-QP dispatch. Fall through to default.
+    case QpSolverType::NEON_IPM:
+        // HPIPM OCP and NEON IPM are called directly from heading_lookup_online,
+        // not through this condensed-QP dispatch. Fall through to default.
     default:
         // Solver not available in this build — zero output
         std::memset(ws.U, 0, n_vars * sizeof(double));

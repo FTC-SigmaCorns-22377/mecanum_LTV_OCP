@@ -7,7 +7,8 @@
 // ---------------------------------------------------------------------------
 enum class QpSolverType {
     FISTA,
-    HPIPM_OCP
+    HPIPM_OCP,
+    NEON_IPM
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,13 @@ int hpipm_ocp_qp_solve(const double* A_d, const double* B_list,
 #endif // MPC_USE_HPIPM
 
 // ---------------------------------------------------------------------------
+// Forward-declare IPM workspace (defined in ipm_solver.h)
+// ---------------------------------------------------------------------------
+struct IpmWorkspace;
+struct IpmSolverConfig;
+struct EulerDynamicsData;
+
+// ---------------------------------------------------------------------------
 // Unified solver context — holds workspaces for all enabled solvers
 // ---------------------------------------------------------------------------
 struct SolverContext {
@@ -61,6 +69,9 @@ struct SolverContext {
 #ifdef MPC_USE_HPIPM
     HpipmOcpWorkspace hpipm_ocp_ws;
 #endif
+
+    IpmWorkspace* ipm_ws;      // allocated on init, freed on cleanup
+    IpmSolverConfig* ipm_config;
 };
 
 // Initialize all workspaces in the context for problems of dimension n.
@@ -89,6 +100,8 @@ inline bool solver_available(QpSolverType type) {
 #else
             return false;
 #endif
+        case QpSolverType::NEON_IPM:
+            return true;  // always available (scalar fallback)
     }
     return false;
 }
@@ -97,6 +110,7 @@ inline const char* solver_name(QpSolverType type) {
     switch (type) {
         case QpSolverType::FISTA:      return "fista";
         case QpSolverType::HPIPM_OCP:  return "hpipm_ocp";
+        case QpSolverType::NEON_IPM:   return "neon_ipm";
     }
     return "unknown";
 }

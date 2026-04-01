@@ -4,6 +4,7 @@
 #include "mecanum_model.h"
 #include "qp_solvers.h"
 #include "heading_lookup.h"
+#include "ipm_solver.h"
 
 // High-level MPC controller wrapping offline precomputation + online solve.
 // Owns all allocated memory; no raw pointers exposed.
@@ -95,6 +96,10 @@ private:
     HeadingLookupData hld_;
     HeadingScheduleConfig sched_config_;
     bool hld_valid_;
+
+    // Euler dynamics for IPM solver
+    EulerDynamicsData euler_data_;
+    bool euler_valid_;
 
     // Solver context and type
     SolverContext solver_ctx_;

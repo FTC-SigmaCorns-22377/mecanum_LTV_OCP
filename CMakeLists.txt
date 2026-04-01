@@ -135,6 +135,7 @@ add_library(mecanum_mpc STATIC
     src/mecanum_ltv.cpp
     src/heading_lookup_offline.cpp
     src/heading_lookup_online.cpp
+    src/ipm_solver.cpp
 )
 target_link_libraries(mecanum_mpc PUBLIC blasfeo m)
 target_include_directories(mecanum_mpc PUBLIC include/)
@@ -215,6 +216,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_mpc_test(test_timing)
     add_mpc_test(test_heading_lookup)
     add_mpc_test(test_riccati_tracking)
+    add_mpc_test(test_ipm_solver)
 
     # Rerun visualization tests (optional)
     if(MPC_ENABLE_RERUN)

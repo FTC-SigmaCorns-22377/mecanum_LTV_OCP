@@ -66,11 +66,11 @@ static inline float32x4x4_t cholesky4_inv(
     float li22 = inv2;
     float li32 = -l32 * li22 * inv3;
 
-    // Build L^{-1} columns as NEON vectors
-    float32x4_t li0 = { li00, li10, li20, li30 };
-    float32x4_t li1 = { 0.0f, li11, li21, li31 };
-    float32x4_t li2 = { 0.0f, 0.0f, li22, li32 };
-    float32x4_t li3 = { 0.0f, 0.0f, 0.0f, inv3 };
+    // Build L^{-1} rows as NEON vectors (row layout makes Li^T*Li natural)
+    float32x4_t li0 = { li00, 0.0f, 0.0f, 0.0f };
+    float32x4_t li1 = { li10, li11, 0.0f, 0.0f };
+    float32x4_t li2 = { li20, li21, li22, 0.0f };
+    float32x4_t li3 = { li30, li31, li32, inv3 };
 
     // S^{-1} = Li^T * Li (symmetric, column-major output)
     float32x4_t i0 = vmulq_laneq_f32(li0, li0, 0);

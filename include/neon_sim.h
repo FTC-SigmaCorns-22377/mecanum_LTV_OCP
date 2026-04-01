@@ -112,6 +112,10 @@ inline float32x4_t vfmsq_f32(float32x4_t a, float32x4_t b, float32x4_t c) {
 inline float32x4_t vfmaq_n_f32(float32x4_t a, float32x4_t b, float c) {
     return {{ a.v[0]+b.v[0]*c, a.v[1]+b.v[1]*c, a.v[2]+b.v[2]*c, a.v[3]+b.v[3]*c }};
 }
+// vfmsq_n_f32(a, b, c) = a - b*c  (c is scalar)
+inline float32x4_t vfmsq_n_f32(float32x4_t a, float32x4_t b, float c) {
+    return {{ a.v[0]-b.v[0]*c, a.v[1]-b.v[1]*c, a.v[2]-b.v[2]*c, a.v[3]-b.v[3]*c }};
+}
 
 // ---------------------------------------------------------------------------
 // Lane-indexed multiply / fma: vmulq_laneq_f32, vfmaq_laneq_f32

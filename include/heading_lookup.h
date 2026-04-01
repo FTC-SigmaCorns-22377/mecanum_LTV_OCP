@@ -49,3 +49,18 @@ QPSolution heading_lookup_solve_ocp(const HeadingLookupData& data,
                                     const HeadingScheduleConfig& sched_config,
                                     SolverContext& ctx);
 #endif
+
+// Forward declarations for IPM solver types
+struct EulerDynamicsData;
+struct IpmSolverConfig;
+struct IpmWorkspace;
+
+// IPM solve via 6-state block-sparse Riccati with log-barrier constraints
+QPSolution heading_lookup_solve_ipm(const EulerDynamicsData& euler,
+                                    const HeadingLookupData& hld,
+                                    const RefNode* ref_window,
+                                    const double x0[NX],
+                                    const MPCConfig& config,
+                                    const HeadingScheduleConfig& sched_config,
+                                    const IpmSolverConfig& ipm_config,
+                                    IpmWorkspace& ws);
