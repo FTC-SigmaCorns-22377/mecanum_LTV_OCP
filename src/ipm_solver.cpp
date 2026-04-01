@@ -946,8 +946,13 @@ QPSolution ipm_solve(const EulerDynamicsData& euler,
             float g = -mu / slack_lo + mu / slack_hi;
             int j = i % NU;
             float R_j = (float)R_diag[j];
-            ws.R_eff[i] = R_j + W;
-            ws.ur_eff[i] = (float)u_ref_stacked[i] - g / (R_j + W);
+            float R_eff = R_j + W;
+            ws.R_eff[i] = R_eff;
+            // Correct second-order barrier approximation:
+            //   total cost in u: (1/2)(u-ur)'R(u-ur) + barrier(u)
+            //   ≈ (1/2) u' R_eff u - u'(R·ur + W·u_bar - g)
+            // so R_eff · ur_eff = R·ur + W·u_bar - g
+            ws.ur_eff[i] = (R_j * (float)u_ref_stacked[i] + W * u - g) / R_eff;
         }
 
         // Convert to float arrays for Riccati

@@ -35,9 +35,7 @@ MecanumLTV::~MecanumLTV()
 {
     delete[] windows_;
     delete[] ref_nodes_;
-#ifdef MPC_USE_HPIPM
     solver_context_free(solver_ctx_);
-#endif
 }
 
 void MecanumLTV::setModelParams(const ModelParams& params)
@@ -100,7 +98,8 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
     ref_nodes_ = nullptr;
     n_ref_nodes_ = 0;
     hld_valid_ = false;
-    std::memset(&solver_ctx_, 0, sizeof(solver_ctx_));
+    solver_context_free(solver_ctx_);
+    solver_context_init(solver_ctx_, config_.N * NU);
 
     // Override config dt with the requested uniform dt
     config_.dt = dt;
