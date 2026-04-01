@@ -15,11 +15,15 @@
 #include "discretizer.h"
 #include "blas_dispatch.h"
 #include "box_qp_solver.h"
+#include "qp_solvers.h"
+#include "heading_lookup.h"
+#include "ipm_solver.h"
 
 #include <rerun.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <numeric>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -362,6 +366,58 @@ int main(int argc, char** argv)
     }
     std::printf("Precomputed %d windows\n", n_windows);
 
+    // Precompute heading-lookup data
+    HeadingLookupData hl_data;
+    heading_lookup_precompute(params, config.dt, hl_data);
+    HeadingScheduleConfig sched_config = heading_schedule_config_from_params(params);
+
+    // Precompute Euler dynamics for IPM solver
+    EulerDynamicsData euler_data;
+    euler_dynamics_precompute(params, config.dt, euler_data);
+    IpmSolverConfig ipm_config{};
+
+    // Per-solver run state
+    enum class SolveMode { PRECOMPUTED, HL_NEON_IPM };
+
+    struct SolverRun {
+        const char* name;
+        SolveMode mode;
+        SolverContext ctx;
+        double x_cur[NX];
+        std::vector<rerun::Vec2D> actual_pts;
+        std::vector<double> solve_times_us;
+        rerun::Color color;
+    };
+
+    struct SolverDef {
+        const char* name;
+        SolveMode mode;
+        rerun::Color color;
+    };
+
+    std::vector<SolverDef> solver_defs = {
+        {"fista",       SolveMode::PRECOMPUTED, rerun::Color(0, 200, 0)},
+        {"hl_neon_ipm", SolveMode::HL_NEON_IPM, rerun::Color(255, 180, 0)},
+    };
+
+    int n_vars = config.N * NU;
+    std::vector<SolverRun> runs(solver_defs.size());
+    for (size_t s = 0; s < solver_defs.size(); ++s) {
+        runs[s].name  = solver_defs[s].name;
+        runs[s].mode  = solver_defs[s].mode;
+        runs[s].color = solver_defs[s].color;
+        solver_context_init(runs[s].ctx, n_vars);
+        std::memcpy(runs[s].x_cur, ref_path[0].x_ref, NX * sizeof(double));
+        runs[s].actual_pts.reserve(n_windows + 1);
+        runs[s].actual_pts.push_back({static_cast<float>(ref_path[0].x_ref[0]),
+                                      static_cast<float>(ref_path[0].x_ref[1])});
+    }
+
+    std::printf("Enabled solvers:");
+    for (auto& sd : solver_defs)
+        std::printf(" %s", sd.name);
+    std::printf("\n");
+
     // Initialize rerun
     auto rec = rerun::RecordingStream("mecanum_mpc_tracking");
     rec.spawn().exit_on_failure();
@@ -391,109 +447,133 @@ int main(int argc, char** argv)
     }
 
     // Closed-loop simulation
-    BoxQPWorkspace workspace;
-    std::memset(&workspace, 0, sizeof(workspace));
-
-    double x_cur[NX];
-    std::memcpy(x_cur, ref_path[0].x_ref, NX * sizeof(double));
-
     int n_sim = std::min(n_windows, n_path - 1);
-    std::vector<rerun::Vec2D> actual_pts;
-    actual_pts.reserve(n_sim + 1);
-    actual_pts.push_back({static_cast<float>(x_cur[0]),
-                          static_cast<float>(x_cur[1])});
 
-    std::printf("\nRunning closed-loop simulation (%d steps)...\n", n_sim);
+    std::printf("\nRunning closed-loop simulation (%d steps, %zu solvers)...\n",
+                n_sim, runs.size());
 
     for (int k = 0; k < n_sim; ++k) {
         double t = ref_path[k].t;
         rec.set_time_seconds("sim_time", t);
 
-        // Solve MPC
-        QPSolution sol = mpc_solve_online(windows[k], x_cur, config, workspace);
-
-        // Tracking error
-        double err_pos = std::sqrt(
-            (x_cur[0] - ref_path[k].x_ref[0]) * (x_cur[0] - ref_path[k].x_ref[0]) +
-            (x_cur[1] - ref_path[k].x_ref[1]) * (x_cur[1] - ref_path[k].x_ref[1]));
-        double err_heading = std::fabs(x_cur[2] - ref_path[k].x_ref[2]);  // unsigned magnitude
-
-        // Signed per-state errors
-        double err_px    = x_cur[0] - ref_path[k].x_ref[0];
-        double err_py    = x_cur[1] - ref_path[k].x_ref[1];
-        double err_theta = x_cur[2] - ref_path[k].x_ref[2];
-        double err_vx    = x_cur[3] - ref_path[k].x_ref[3];
-        double err_vy    = x_cur[4] - ref_path[k].x_ref[4];
-        double err_omega = x_cur[5] - ref_path[k].x_ref[5];
-
-        // Log metrics
-        rec.log("metrics/position_error", rerun::Scalars(err_pos));
-        rec.log("metrics/heading_error", rerun::Scalars(err_heading));
-        rec.log("errors/px",    rerun::Scalars(err_px));
-        rec.log("errors/py",    rerun::Scalars(err_py));
-        rec.log("errors/theta", rerun::Scalars(err_theta));
-        rec.log("errors/vx",    rerun::Scalars(err_vx));
-        rec.log("errors/vy",    rerun::Scalars(err_vy));
-        rec.log("errors/omega", rerun::Scalars(err_omega));
-        rec.log("metrics/solve_time_us", rerun::Scalars(sol.solve_time_ns / 1000.0));
-        rec.log("metrics/n_active", rerun::Scalars(static_cast<double>(sol.n_active)));
-
-        // Log control outputs
-        for (int j = 0; j < NU; ++j) {
-            rec.log("control/u" + std::to_string(j), rerun::Scalars(sol.u0[j]));
-        }
-
-        // Log actual state
-        rec.log("state/px", rerun::Scalars(x_cur[0]));
-        rec.log("state/py", rerun::Scalars(x_cur[1]));
-        rec.log("state/theta", rerun::Scalars(x_cur[2]));
-        rec.log("state/vx", rerun::Scalars(x_cur[3]));
-        rec.log("state/vy", rerun::Scalars(x_cur[4]));
-        rec.log("state/omega", rerun::Scalars(x_cur[5]));
-
-        // Log current robot position as a point
-        rec.log("trajectory/actual_position",
-                rerun::Points2D({{static_cast<float>(x_cur[0]),
-                                  static_cast<float>(x_cur[1])}})
-                    .with_colors({rerun::Color(0, 255, 0)})
-                    .with_radii({0.02f}));
-
-        // Log reference position as a point
+        // Log reference position (shared)
         rec.log("trajectory/ref_position",
                 rerun::Points2D({{static_cast<float>(ref_path[k].x_ref[0]),
                                   static_cast<float>(ref_path[k].x_ref[1])}})
                     .with_colors({rerun::Color(255, 100, 100)})
                     .with_radii({0.02f}));
 
-        // Simulate forward
-        rk4_step(x_cur, sol.u0, config.dt, params);
+        for (size_t s = 0; s < runs.size(); ++s) {
+            auto& run = runs[s];
+            std::string prefix = run.name;
 
-        actual_pts.push_back({static_cast<float>(x_cur[0]),
-                              static_cast<float>(x_cur[1])});
+            // Solve MPC (dispatch by mode)
+            QPSolution sol;
+            switch (run.mode) {
+                case SolveMode::PRECOMPUTED:
+                    sol = mpc_solve_online(
+                        windows[k], run.x_cur, config, run.ctx.box_ws);
+                    break;
+                case SolveMode::HL_NEON_IPM:
+                    sol = heading_lookup_solve_ipm(
+                        euler_data, hl_data, &ref_path[k], run.x_cur, config,
+                        sched_config, ipm_config, *run.ctx.ipm_ws);
+                    break;
+            }
 
-        // Log growing actual trajectory
-        rec.log("trajectory/actual",
-                rerun::LineStrips2D(rerun::LineStrip2D(actual_pts))
-                    .with_colors({rerun::Color(0, 200, 0)}));
+            double solve_us = sol.solve_time_ns / 1000.0;
+            run.solve_times_us.push_back(solve_us);
+
+            // Tracking error
+            double err_pos = std::sqrt(
+                (run.x_cur[0] - ref_path[k].x_ref[0]) * (run.x_cur[0] - ref_path[k].x_ref[0]) +
+                (run.x_cur[1] - ref_path[k].x_ref[1]) * (run.x_cur[1] - ref_path[k].x_ref[1]));
+            double err_heading = std::fabs(run.x_cur[2] - ref_path[k].x_ref[2]);
+
+            // Log metrics
+            rec.log("metrics/position_error/" + prefix, rerun::Scalars(err_pos));
+            rec.log("metrics/heading_error/" + prefix, rerun::Scalars(err_heading));
+            rec.log("metrics/solve_time_us/" + prefix, rerun::Scalars(solve_us));
+            rec.log("metrics/n_iterations/" + prefix,
+                    rerun::Scalars(static_cast<double>(sol.n_iterations)));
+
+            // Log control outputs
+            for (int j = 0; j < NU; ++j)
+                rec.log("control/u" + std::to_string(j) + "/" + prefix,
+                        rerun::Scalars(sol.u0[j]));
+
+            // Log actual state
+            rec.log("state/px/" + prefix, rerun::Scalars(run.x_cur[0]));
+            rec.log("state/py/" + prefix, rerun::Scalars(run.x_cur[1]));
+            rec.log("state/theta/" + prefix, rerun::Scalars(run.x_cur[2]));
+            rec.log("state/vx/" + prefix, rerun::Scalars(run.x_cur[3]));
+            rec.log("state/vy/" + prefix, rerun::Scalars(run.x_cur[4]));
+            rec.log("state/omega/" + prefix, rerun::Scalars(run.x_cur[5]));
+
+            // Log current robot position as a point
+            rec.log("trajectory/" + prefix + "_position",
+                    rerun::Points2D({{static_cast<float>(run.x_cur[0]),
+                                      static_cast<float>(run.x_cur[1])}})
+                        .with_colors({run.color})
+                        .with_radii({0.02f}));
+
+            // Simulate forward
+            rk4_step(run.x_cur, sol.u0, config.dt, params);
+
+            run.actual_pts.push_back({static_cast<float>(run.x_cur[0]),
+                                      static_cast<float>(run.x_cur[1])});
+
+            // Log growing actual trajectory
+            rec.log("trajectory/" + prefix,
+                    rerun::LineStrips2D(rerun::LineStrip2D(run.actual_pts))
+                        .with_colors({run.color}));
+        }
 
         if (k % 10 == 0 || k == n_sim - 1) {
-            std::printf("  step %3d/%d  pos_err=%.4f  heading_err=%.4f  "
-                        "u0=[%6.3f %6.3f %6.3f %6.3f]  u_ref=[%6.3f %6.3f %6.3f %6.3f]  solve=%.0fus  iter=%d\n",
-                        k, n_sim, err_pos, err_heading,
-                        sol.u0[0], sol.u0[1], sol.u0[2], sol.u0[3],
-                        ref_path[k].u_ref[0], ref_path[k].u_ref[1],
-                        ref_path[k].u_ref[2], ref_path[k].u_ref[3],
-                        sol.solve_time_ns / 1000.0, sol.n_iterations);
+            std::printf("  step %3d/%d", k, n_sim);
+            for (auto& run : runs)
+                std::printf("  %s=%.0fus", run.name, run.solve_times_us.back());
+            std::printf("\n");
         }
     }
 
-    // Final error (relative to the original trajectory endpoint)
-    double final_err = std::sqrt(
-        (x_cur[0] - ref_path[n_path_orig - 1].x_ref[0]) * (x_cur[0] - ref_path[n_path_orig - 1].x_ref[0]) +
-        (x_cur[1] - ref_path[n_path_orig - 1].x_ref[1]) * (x_cur[1] - ref_path[n_path_orig - 1].x_ref[1]));
-    std::printf("\nFinal position error: %.4f m  (vs original trajectory endpoint)\n", final_err);
+    // Summary table
+    std::printf("\n%-20s %8s %8s %8s %8s  %12s %12s\n",
+                "Solver", "Mean(us)", "Med(us)", "Max(us)", "Min(us)",
+                "Final|pos|", "Final|θ|");
+    std::printf("%-20s %8s %8s %8s %8s  %12s %12s\n",
+                "--------------------", "--------", "-------", "-------", "-------",
+                "------------", "------------");
 
+    for (auto& run : runs) {
+        auto& times = run.solve_times_us;
+        if (times.empty()) continue;
+
+        double sum = std::accumulate(times.begin(), times.end(), 0.0);
+        double mean = sum / static_cast<double>(times.size());
+
+        std::vector<double> sorted = times;
+        std::sort(sorted.begin(), sorted.end());
+        double median = sorted[sorted.size() / 2];
+        double max_t = sorted.back();
+        double min_t = sorted.front();
+
+        double ep = std::sqrt(
+            (run.x_cur[0] - ref_path[n_path_orig - 1].x_ref[0]) *
+            (run.x_cur[0] - ref_path[n_path_orig - 1].x_ref[0]) +
+            (run.x_cur[1] - ref_path[n_path_orig - 1].x_ref[1]) *
+            (run.x_cur[1] - ref_path[n_path_orig - 1].x_ref[1]));
+        double eth = std::fabs(run.x_cur[2] - ref_path[n_path_orig - 1].x_ref[2]);
+
+        std::printf("%-20s %8.1f %8.1f %8.1f %8.1f  %12.4f %12.4f\n",
+                    run.name, mean, median, max_t, min_t, ep, eth);
+    }
+
+    // Cleanup
+    for (auto& run : runs)
+        solver_context_free(run.ctx);
     delete[] windows;
-    std::printf("Done. Check the rerun viewer for visualization.\n");
+
+    std::printf("\nDone. Check the rerun viewer for visualization.\n");
     return 0;
 }

@@ -327,7 +327,7 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeNumVars(JNIEnv* env, jclass, 
 }
 
 // void nativeSetSolverType(long handle, int type)
-//   0 = FISTA, 1 = HPIPM_OCP
+//   0 = FISTA, 1 = HPIPM_OCP, 2 = NEON_IPM
 JNIEXPORT void JNICALL
 Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetSolverType(
     JNIEnv* env, jclass, jlong handle, jint type)
@@ -338,6 +338,7 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetSolverType(
     switch (type) {
         case 0: solver_type = QpSolverType::FISTA;     break;
         case 1: solver_type = QpSolverType::HPIPM_OCP; break;
+        case 2: solver_type = QpSolverType::NEON_IPM;  break;
         default:
             throw_illegal_argument(env, "Unknown solver type: " + std::to_string(type));
             return;
@@ -366,6 +367,7 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeIsSolverAvailable(
 #else
             return JNI_FALSE;
 #endif
+        case 2: return JNI_TRUE;  // NEON_IPM always available (scalar fallback)
         default: return JNI_FALSE;
     }
 }

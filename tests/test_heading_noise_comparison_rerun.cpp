@@ -23,6 +23,7 @@
 #include "box_qp_solver.h"
 #include "qp_solvers.h"
 #include "heading_lookup.h"
+#include "ipm_solver.h"
 
 #include <rerun.hpp>
 #include <nlohmann/json.hpp>
@@ -220,7 +221,7 @@ static void rk4_step(double* x, const double* u, double dt,
 // ---------------------------------------------------------------------------
 // Per-solver run state
 // ---------------------------------------------------------------------------
-enum class SolveMode { PRECOMPUTED, HL_TRIG_OCP };
+enum class SolveMode { PRECOMPUTED, HL_TRIG_OCP, HL_NEON_IPM };
 
 struct SolverRun {
     const char* name;
@@ -343,11 +344,17 @@ int main(int argc, char** argv)
 #ifdef MPC_USE_HPIPM
     solver_defs.push_back({"hl_trig_hpipm_ocp", SolveMode::HL_TRIG_OCP, rerun::Color(100, 255, 200)});
 #endif
+    solver_defs.push_back({"hl_neon_ipm", SolveMode::HL_NEON_IPM, rerun::Color(255, 180, 0)});
 
     std::printf("Enabled solvers:");
     for (auto& sd : solver_defs)
         std::printf(" %s", sd.name);
     std::printf("\n");
+
+    // Precompute Euler dynamics for IPM solver
+    EulerDynamicsData euler_data;
+    euler_dynamics_precompute(params, config.dt, euler_data);
+    IpmSolverConfig ipm_config{};
 
     // Heading process-noise table (shared across all solver runs so each sees
     // the same disturbance sequence and their x_cur trajectories stay coupled)
@@ -431,6 +438,11 @@ int main(int argc, char** argv)
                     std::memset(&sol, 0, sizeof(sol));
                     break;
 #endif
+                case SolveMode::HL_NEON_IPM:
+                    sol = heading_lookup_solve_ipm(
+                        euler_data, hl_data, &ref_path[k], run.x_cur, config,
+                        sched_config, ipm_config, *run.ctx.ipm_ws);
+                    break;
             }
 
             double solve_us = sol.solve_time_ns / 1000.0;
@@ -499,6 +511,7 @@ int main(int argc, char** argv)
         switch (m) {
             case SolveMode::PRECOMPUTED:  return "offline";
             case SolveMode::HL_TRIG_OCP:  return "hl_trig_ocp";
+            case SolveMode::HL_NEON_IPM:  return "hl_neon_ipm";
         }
         return "?";
     };

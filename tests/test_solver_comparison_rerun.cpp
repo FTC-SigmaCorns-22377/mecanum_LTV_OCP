@@ -13,6 +13,7 @@
 #include "box_qp_solver.h"
 #include "qp_solvers.h"
 #include "heading_lookup.h"
+#include "ipm_solver.h"
 
 #include <rerun.hpp>
 #include <nlohmann/json.hpp>
@@ -213,7 +214,7 @@ static void rk4_step(double* x, const double* u, double dt,
 // ---------------------------------------------------------------------------
 // Per-solver run state
 // ---------------------------------------------------------------------------
-enum class SolveMode { PRECOMPUTED, HL_TRIG_OCP };
+enum class SolveMode { PRECOMPUTED, HL_TRIG_OCP, HL_NEON_IPM };
 
 struct SolverRun {
     const char* name;
@@ -331,6 +332,7 @@ int main(int argc, char** argv)
 #ifdef MPC_USE_HPIPM
     solver_defs.push_back({"hl_trig_hpipm_ocp", SolveMode::HL_TRIG_OCP, rerun::Color(100, 255, 200)});
 #endif
+    solver_defs.push_back({"hl_neon_ipm", SolveMode::HL_NEON_IPM, rerun::Color(255, 180, 0)});
 
     std::printf("Enabled solvers:");
     for (auto& sd : solver_defs)
@@ -343,6 +345,11 @@ int main(int argc, char** argv)
     std::printf("Heading-lookup trig decomposition precomputed\n");
 
     HeadingScheduleConfig sched_config = heading_schedule_config_from_params(params);
+
+    // Precompute Euler dynamics for IPM solver
+    EulerDynamicsData euler_data;
+    euler_dynamics_precompute(params, config.dt, euler_data);
+    IpmSolverConfig ipm_config{};
 
     // Initialize solver runs
     int n_vars = config.N * NU;
@@ -415,6 +422,11 @@ int main(int argc, char** argv)
                     std::memset(&sol, 0, sizeof(sol));
                     break;
 #endif
+                case SolveMode::HL_NEON_IPM:
+                    sol = heading_lookup_solve_ipm(
+                        euler_data, hl_data, &ref_path[k], run.x_cur, config,
+                        sched_config, ipm_config, *run.ctx.ipm_ws);
+                    break;
             }
 
             double solve_us = sol.solve_time_ns / 1000.0;
