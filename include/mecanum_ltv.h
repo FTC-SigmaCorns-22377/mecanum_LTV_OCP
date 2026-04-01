@@ -41,12 +41,6 @@ public:
     // Returns the number of MPC windows produced (0 on failure).
     int loadTrajectory(const double* samples, int n_samples, double dt);
 
-    // Load precomputed windows from a .bin file (v2 format).
-    // No setModelParams/setConfig/loadTrajectory needed — all config
-    // is reconstructed from the file header.
-    // Returns the number of windows loaded (0 on failure).
-    int loadWindows(const char* filepath);
-
     // Save precomputed windows to a .bin file (v2 format).
     // Returns 0 on success, non-zero on failure.
     int saveWindows(const char* filepath) const;
@@ -73,7 +67,6 @@ public:
     int numTrajectoryWindows() const { return n_traj_windows_; }
     int horizonLength() const { return config_.N; }
     int numVars() const { return config_.N * NU; }
-    double dt() const { return config_.dt; }
 
 private:
     MecanumLTV(const MecanumLTV&) = delete;
