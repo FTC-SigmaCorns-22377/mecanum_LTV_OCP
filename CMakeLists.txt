@@ -214,6 +214,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_mpc_test(test_load_windows)
     add_mpc_test(test_timing)
     add_mpc_test(test_heading_lookup)
+    add_mpc_test(test_riccati_tracking)
 
     # Rerun visualization tests (optional)
     if(MPC_ENABLE_RERUN)
