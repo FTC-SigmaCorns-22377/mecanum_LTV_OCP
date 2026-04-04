@@ -135,6 +135,7 @@ add_library(mecanum_mpc STATIC
     src/heading_lookup_offline.cpp
     src/heading_lookup_online.cpp
     src/ipm_solver.cpp
+    src/waypoint_solve.cpp
 )
 target_link_libraries(mecanum_mpc PUBLIC blasfeo m)
 target_include_directories(mecanum_mpc PUBLIC include/)
@@ -196,6 +197,7 @@ if(NOT CMAKE_CROSSCOMPILING)
         add_mpc_test(test_riccati_tracking)
     endif()
     add_mpc_test(test_ipm_solver)
+    add_mpc_test(test_waypoint_tracking)
 
     # Rerun visualization tests (optional)
     if(MPC_ENABLE_RERUN)

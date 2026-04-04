@@ -372,4 +372,43 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeIsSolverAvailable(
     }
 }
 
+// int nativeSolveWaypoint(long handle, double dt,
+//   double[] x0, double[] xTarget, double tRemaining,
+//   boolean lqrRef, double[] uOut)
+//   Solves to a target state without a preloaded trajectory.
+//   x0 and xTarget are length 6: [px, py, theta, vx, vy, omega]
+//   dt:     control timestep hint (seconds) — used if loadTrajectory has not been called
+//   lqrRef: if true, use x_target as a constant reference (LQR-optimal, best for
+//           zero-velocity arrival); if false, use Hermite interpolation
+//   uOut is length 4: first control step [V1, V2, V3, V4]
+//   Returns 0 on success, -1 on error.
+JNIEXPORT jint JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSolveWaypoint(
+    JNIEnv* env, jclass, jlong handle,
+    jdouble dt,
+    jdoubleArray x0, jdoubleArray xTarget,
+    jdouble tRemaining, jboolean lqrRef, jdoubleArray uOut)
+{
+    if (!check_handle(env, handle)) return -1;
+    if (!check_array(env, x0,      NX, "x0"))      return -1;
+    if (!check_array(env, xTarget, NX, "xTarget")) return -1;
+    if (!check_array(env, uOut,    NU, "uOut"))     return -1;
+
+    ScopedDoubleArray x0_arr    (env, x0,      JNI_ABORT);
+    ScopedDoubleArray target_arr(env, xTarget, JNI_ABORT);
+    ScopedDoubleArray u_arr     (env, uOut,    0);        // writeback
+    if (!x0_arr.valid() || !target_arr.valid() || !u_arr.valid()) return -1;
+
+    try {
+        return from_handle(handle)->solve_waypoint(
+            x0_arr.data(), target_arr.data(), tRemaining, dt,
+            lqrRef == JNI_TRUE, u_arr.data());
+    } catch (const std::exception& e) {
+        throw_runtime(env, std::string("solve_waypoint failed: ") + e.what());
+    } catch (...) {
+        throw_runtime(env, "solve_waypoint failed: unknown error");
+    }
+    return -1;
+}
+
 } // extern "C"

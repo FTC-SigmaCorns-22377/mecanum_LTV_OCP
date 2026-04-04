@@ -1,5 +1,6 @@
 #include "mecanum_ltv.h"
 #include "ipm_solver.h"
+#include "waypoint_solve.h"
 #include "mpc_offline.h"
 #include "mpc_online.h"
 
@@ -23,9 +24,11 @@ MecanumLTV::MecanumLTV()
     , euler_data_{}
     , euler_valid_(false)
     , solver_ctx_{}
+    , solver_ctx_valid_(false)
     , solver_type_(QpSolverType::FISTA)
     , win_sel_config_{}
     , prev_idx_(0)
+    , prev_waypoint_n_(-1)
     , elapsed_total_(0.0)
     , was_holding_(false)
 {
@@ -98,8 +101,10 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
     ref_nodes_ = nullptr;
     n_ref_nodes_ = 0;
     hld_valid_ = false;
+    euler_valid_ = false;
     solver_context_free(solver_ctx_);
     solver_context_init(solver_ctx_, config_.N * NU);
+    solver_ctx_valid_ = true;
 
     // Override config dt with the requested uniform dt
     config_.dt = dt;
@@ -190,10 +195,9 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
     elapsed_total_ = 0.0;
     was_holding_ = false;
 
-    // Precompute heading-lookup LTV data for the HPIPM path
-    heading_lookup_precompute(params_, config_.dt, hld_);
-    sched_config_ = heading_schedule_config_from_params(params_);
-    hld_valid_ = true;
+    // Precompute heading-lookup LTV data and Euler dynamics
+    ensure_hld_ready();
+    ensure_euler_ready();
 
     return n_windows_;
 }
@@ -206,6 +210,145 @@ static double angle_wrap(double a)
     while (a >  M_PI) a -= 2.0 * M_PI;
     while (a < -M_PI) a += 2.0 * M_PI;
     return a;
+}
+
+// ---------------------------------------------------------------------------
+// Lazy-init helpers
+// ---------------------------------------------------------------------------
+void MecanumLTV::ensure_hld_ready()
+{
+    if (hld_valid_) return;
+    heading_lookup_precompute(params_, config_.dt, hld_);
+    sched_config_ = heading_schedule_config_from_params(params_);
+    hld_valid_ = true;
+}
+
+void MecanumLTV::ensure_euler_ready()
+{
+    if (euler_valid_) return;
+    euler_dynamics_precompute(params_, config_.dt, euler_data_);
+    euler_valid_ = true;
+}
+
+void MecanumLTV::ensure_solver_ctx_ready()
+{
+    if (solver_ctx_valid_) return;
+    solver_context_init(solver_ctx_, config_.N * NU);
+    solver_ctx_valid_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Waypoint solve — online, no precomputed trajectory required
+// ---------------------------------------------------------------------------
+int MecanumLTV::solve_waypoint(const double x0[NX],
+                                const double x_target[NX],
+                                double t_remaining,
+                                double dt_hint,
+                                bool lqr_ref,
+                                double* u_out)
+{
+    if (!params_set_ || !config_set_) return -1;
+
+    // config_.dt is normally set by loadTrajectory(); use dt_hint if not yet set
+    if (config_.dt <= 0.0) {
+        if (dt_hint <= 0.0) return -1;
+        config_.dt = dt_hint;
+    }
+
+    ensure_hld_ready();
+    ensure_euler_ready();
+    ensure_solver_ctx_ready();
+
+    const double dt = config_.dt;
+
+    // Shorten the effective horizon so Qf lands exactly on the deadline.
+    // N_eff = ceil(t_remaining / dt), capped at config_.N.
+    // When t_remaining >= N*dt, N_eff == N and nothing changes.
+    const int N_eff = (t_remaining > 0.0)
+        ? std::max(1, std::min((int)std::ceil(t_remaining / dt), config_.N))
+        : 1;
+
+    // Invalidate warm-start when the horizon length changes between calls
+    if (N_eff != prev_waypoint_n_) {
+        solver_ctx_.ipm_ws->warm_valid = false;
+        prev_waypoint_n_ = N_eff;
+    }
+
+    // Build a local config with the effective horizon
+    MPCConfig eff_cfg = config_;
+    eff_cfg.N = N_eff;
+
+    // Avoid division by zero for Hermite; when t_remaining <= 0 the reference
+    // will be all-target anyway (t clamped to 1)
+    const double T = t_remaining > 1e-6 ? t_remaining : 1e-6;
+
+    // Heading: always use Hermite so the heading schedule inside the IPM solver
+    // gets physically-correct B-matrix guidance throughout the horizon.
+    const double dtheta = angle_wrap(x_target[2] - x0[2]);
+    const double theta1 = x0[2] + dtheta;   // unwrapped target heading
+    const double omega0 = x0[5];
+    const double omega1 = x_target[5];
+
+    RefNode ref_window[N_MAX + 1];
+
+    for (int k = 0; k <= N_eff; ++k) {
+        const double tau = k * dt;
+        double t = tau / T;
+        if (t > 1.0) t = 1.0;
+
+        // Hermite heading (always, for accurate B-matrix construction)
+        const double t2 = t * t, t3 = t2 * t;
+        const double h00 =  2.0*t3 - 3.0*t2 + 1.0;
+        const double h10 =      t3 - 2.0*t2 + t;
+        const double h01 = -2.0*t3 + 3.0*t2;
+        const double h11 =      t3 -      t2;
+        const double dh00 = ( 6.0*t2 - 6.0*t) / T;
+        const double dh10 =   3.0*t2 - 4.0*t + 1.0;
+        const double dh01 = (-6.0*t2 + 6.0*t) / T;
+        const double dh11 =   3.0*t2 - 2.0*t;
+
+        const double theta = angle_wrap(h00*x0[2] + h10*T*omega0
+                                      + h01*theta1 + h11*T*omega1);
+        const double omega = dh00*x0[2] + dh10*omega0
+                           + dh01*theta1 + dh11*omega1;
+        ref_window[k].x_ref[2] = theta;
+        ref_window[k].x_ref[5] = omega;
+        ref_window[k].theta    = theta;
+        ref_window[k].omega    = omega;
+
+        if (lqr_ref) {
+            // LQR mode: constant reference = x_target.
+            // The Riccati backward pass minimises Σ‖x_k − x_target‖²_Q + ‖u_k‖²_R
+            // + ‖x_N − x_target‖²_Qf, which is the exact discrete LQR cost.
+            // Optimal for zero-velocity arrival; well-behaved for others.
+            ref_window[k].x_ref[0] = x_target[0];  // px
+            ref_window[k].x_ref[1] = x_target[1];  // py
+            ref_window[k].x_ref[3] = x_target[3];  // vx
+            ref_window[k].x_ref[4] = x_target[4];  // vy
+            // theta / omega already set above from Hermite
+        } else {
+            // Hermite mode: smooth cubic reference matching position + velocity
+            // at both endpoints. Better for nonzero-velocity arrival targets.
+            ref_window[k].x_ref[0] = h00*x0[0]        + h10*T*x0[3]
+                                    + h01*x_target[0]  + h11*T*x_target[3];
+            ref_window[k].x_ref[3] = dh00*x0[0]       + dh10*x0[3]
+                                    + dh01*x_target[0] + dh11*x_target[3];
+            ref_window[k].x_ref[1] = h00*x0[1]        + h10*T*x0[4]
+                                    + h01*x_target[1]  + h11*T*x_target[4];
+            ref_window[k].x_ref[4] = dh00*x0[1]       + dh10*x0[4]
+                                    + dh01*x_target[1] + dh11*x_target[4];
+        }
+
+        ref_window[k].t = tau;
+        std::memset(ref_window[k].u_ref, 0, NU * sizeof(double));
+    }
+
+    QPSolution sol = ipm_solve_terminal(
+        euler_data_, hld_, ref_window, x0, x_target, eff_cfg,
+        sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws);
+
+    std::memcpy(u_out, sol.U, NU * sizeof(double));
+    return 0;
 }
 
 int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
@@ -287,10 +430,7 @@ int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
     if (solver_type_ == QpSolverType::NEON_IPM
             && ref_nodes_
             && window_idx + config_.N + 1 <= n_ref_nodes_) {
-        if (!euler_valid_) {
-            euler_dynamics_precompute(params_, config_.dt, euler_data_);
-            euler_valid_ = true;
-        }
+        ensure_euler_ready();
         if (window_idx >= n_windows_ - 1)
             solver_ctx_.ipm_ws->warm_valid = false;
         QPSolution sol = heading_lookup_solve_ipm(

@@ -55,6 +55,35 @@ public:
     // Internally maintains prev_idx_ (monotone, never decreases).
     int solve(const double x0[NX], double dt_since_last, double* u_out);
 
+    // Solve to a target waypoint without any preloaded trajectory.
+    // Generates a Hermite-interpolated reference from x0 to x_target over
+    // t_remaining seconds, then solves via NEON_IPM.
+    //
+    // Call every control loop with the current state and remaining time.
+    // The target can change each call with zero precomputation overhead.
+    // Requires setModelParams() and setConfig() but NOT loadTrajectory().
+    //
+    // x0:          current state [px, py, theta, vx, vy, omega]
+    // x_target:    desired state at t_remaining seconds from now
+    // t_remaining: seconds until waypoint must be reached (clamped to >= 0)
+    // u_out:       output — first 4 controls [V1,V2,V3,V4]
+    // Returns 0 on success, -1 if not configured.
+    // dt_hint:  control timestep to use if loadTrajectory has not been called
+    //           (ignored if loadTrajectory has already set config_.dt)
+    // lqr_ref:  if false (default), use a Hermite-interpolated reference — good for
+    //           nonzero arrival velocities but sub-optimal in general.
+    //           if true, use x_target as a constant reference — the Riccati backward
+    //           pass then solves the exact discrete LQR problem and finds the
+    //           dynamically-optimal trajectory. Best for zero-velocity arrival.
+    //           The effective horizon is also shortened to ceil(t_remaining/dt) so
+    //           the terminal Qf cost lands exactly on the deadline in both modes.
+    int solve_waypoint(const double x0[NX],
+                       const double x_target[NX],
+                       double t_remaining,
+                       double dt_hint,
+                       bool lqr_ref,
+                       double* u_out);
+
     // Index selected by the most recent solve() call. Useful for logging.
     int prevIdx() const { return prev_idx_; }
 
@@ -71,6 +100,10 @@ public:
 private:
     MecanumLTV(const MecanumLTV&) = delete;
     MecanumLTV& operator=(const MecanumLTV&) = delete;
+
+    void ensure_hld_ready();
+    void ensure_euler_ready();
+    void ensure_solver_ctx_ready();
 
     ModelParams params_;
     MPCConfig config_;
@@ -96,11 +129,13 @@ private:
 
     // Solver context and type
     SolverContext solver_ctx_;
+    bool solver_ctx_valid_;
     QpSolverType solver_type_;
 
     // Cost-based window selection state
     WindowSelConfig win_sel_config_;
     int    prev_idx_;
+    int    prev_waypoint_n_;   // N_eff from previous solve_waypoint call; -1 = never called
     double elapsed_total_;  // seconds accumulated while on-path; drives time_idx_float
     bool   was_holding_;    // true if the previous solve was in hold (off-path) mode
 };
