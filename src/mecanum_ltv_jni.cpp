@@ -374,12 +374,14 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeIsSolverAvailable(
 
 // int nativeSolveWaypoint(long handle, double dt,
 //   double[] x0, double[] xTarget, double tRemaining,
-//   boolean lqrRef, double[] uOut)
+//   boolean lqrRef, double[] qDiag, double r, double[] uOut)
 //   Solves to a target state without a preloaded trajectory.
 //   x0 and xTarget are length 6: [px, py, theta, vx, vy, omega]
 //   dt:     control timestep hint (seconds) — used if loadTrajectory has not been called
 //   lqrRef: if true, use x_target as a constant reference (LQR-optimal, best for
 //           zero-velocity arrival); if false, use Hermite interpolation
+//   qDiag:  length-6 state cost diagonal for this solve (overrides setConfig Q)
+//   r:      input cost scalar applied uniformly to all 4 inputs (overrides setConfig R)
 //   uOut is length 4: first control step [V1, V2, V3, V4]
 //   Returns 0 on success, -1 on error.
 JNIEXPORT jint JNICALL
@@ -387,28 +389,41 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSolveWaypoint(
     JNIEnv* env, jclass, jlong handle,
     jdouble dt,
     jdoubleArray x0, jdoubleArray xTarget,
-    jdouble tRemaining, jboolean lqrRef, jdoubleArray uOut)
+    jdouble tRemaining, jboolean lqrRef,
+    jdoubleArray qDiag, jdouble r, jdoubleArray uOut)
 {
     if (!check_handle(env, handle)) return -1;
     if (!check_array(env, x0,      NX, "x0"))      return -1;
     if (!check_array(env, xTarget, NX, "xTarget")) return -1;
+    if (!check_array(env, qDiag,   NX, "qDiag"))   return -1;
     if (!check_array(env, uOut,    NU, "uOut"))     return -1;
 
     ScopedDoubleArray x0_arr    (env, x0,      JNI_ABORT);
     ScopedDoubleArray target_arr(env, xTarget, JNI_ABORT);
+    ScopedDoubleArray q_arr     (env, qDiag,   JNI_ABORT);
     ScopedDoubleArray u_arr     (env, uOut,    0);        // writeback
-    if (!x0_arr.valid() || !target_arr.valid() || !u_arr.valid()) return -1;
+    if (!x0_arr.valid() || !target_arr.valid() || !q_arr.valid() || !u_arr.valid()) return -1;
 
     try {
         return from_handle(handle)->solve_waypoint(
             x0_arr.data(), target_arr.data(), tRemaining, dt,
-            lqrRef == JNI_TRUE, u_arr.data());
+            lqrRef == JNI_TRUE, q_arr.data(), r, u_arr.data());
     } catch (const std::exception& e) {
         throw_runtime(env, std::string("solve_waypoint failed: ") + e.what());
     } catch (...) {
         throw_runtime(env, "solve_waypoint failed: unknown error");
     }
     return -1;
+}
+
+// double nativeGetWaypointEta(long handle)
+//   Returns the ETA (seconds) computed by the most recent solve_waypoint() call.
+JNIEXPORT jdouble JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeGetWaypointEta(
+    JNIEnv* env, jclass, jlong handle)
+{
+    if (!check_handle(env, handle)) return 0.0;
+    return from_handle(handle)->prevWaypointEta();
 }
 
 } // extern "C"

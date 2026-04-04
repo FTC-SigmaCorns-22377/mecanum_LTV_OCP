@@ -29,6 +29,7 @@ MecanumLTV::MecanumLTV()
     , win_sel_config_{}
     , prev_idx_(0)
     , prev_waypoint_n_(-1)
+    , prev_waypoint_eta_(0.0)
     , elapsed_total_(0.0)
     , was_holding_(false)
 {
@@ -245,6 +246,8 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
                                 double t_remaining,
                                 double dt_hint,
                                 bool lqr_ref,
+                                const double q_diag[NX],
+                                double r_scalar,
                                 double* u_out)
 {
     if (!params_set_ || !config_set_) return -1;
@@ -274,9 +277,11 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
         prev_waypoint_n_ = N_eff;
     }
 
-    // Build a local config with the effective horizon
+    // Build a local config with the effective horizon and per-solve cost overrides
     MPCConfig eff_cfg = config_;
     eff_cfg.N = N_eff;
+    for (int i = 0; i < NX; ++i) eff_cfg.Q[i + NX * i]  = q_diag[i];
+    for (int i = 0; i < NU; ++i) eff_cfg.R[i + NU * i]   = r_scalar;
 
     // Avoid division by zero for Hermite; when t_remaining <= 0 the reference
     // will be all-target anyway (t clamped to 1)
@@ -348,6 +353,54 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
         sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws);
 
     std::memcpy(u_out, sol.U, NU * sizeof(double));
+
+    // ---------------------------------------------------------------------------
+    // ETA estimation: forward-simulate sol.U from x0, find the step at which
+    // the predicted trajectory is closest to x_target in XY position.
+    // This gives a self-consistent tRemaining hint for the next call.
+    // ---------------------------------------------------------------------------
+    {
+        double xs[3] = { x0[0], x0[1], x0[2] };  // position [px, py, theta]
+        double vs[3] = { x0[3], x0[4], x0[5] };  // velocity [vx, vy, omega]
+
+        int    k_min  = 0;
+        double dist_min = (xs[0]-x_target[0])*(xs[0]-x_target[0])
+                        + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
+
+        for (int k = 0; k < N_eff; ++k) {
+            // Rotate B_body by current heading
+            const double ct = std::cos(xs[2]), st = std::sin(xs[2]);
+            double Bl[12];
+            for (int j = 0; j < 4; ++j) {
+                Bl[0*4+j] =  ct*(double)euler_data_.B_body[0*4+j] - st*(double)euler_data_.B_body[1*4+j];
+                Bl[1*4+j] =  st*(double)euler_data_.B_body[0*4+j] + ct*(double)euler_data_.B_body[1*4+j];
+                Bl[2*4+j] = (double)euler_data_.B_body[2*4+j];
+            }
+
+            // Bu = Bl · u[k]
+            const double* uk = sol.U + k * NU;
+            double Bu[3] = {};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 4; ++j)
+                    Bu[i] += Bl[i*4+j] * uk[j];
+
+            // Euler step: p_{k+1} = p_k + dt·v_k,  v_{k+1} = D·v_k + Bl·u_k
+            for (int i = 0; i < 3; ++i) {
+                xs[i] += dt * vs[i];
+                vs[i]  = (double)euler_data_.D_diag[i] * vs[i] + Bu[i];
+            }
+
+            const double dist = (xs[0]-x_target[0])*(xs[0]-x_target[0])
+                              + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
+            if (dist < dist_min) {
+                dist_min = dist;
+                k_min    = k + 1;  // +1 because we just propagated to step k+1
+            }
+        }
+
+        prev_waypoint_eta_ = k_min * dt;
+    }
+
     return 0;
 }
 

@@ -77,15 +77,25 @@ public:
     //           dynamically-optimal trajectory. Best for zero-velocity arrival.
     //           The effective horizon is also shortened to ceil(t_remaining/dt) so
     //           the terminal Qf cost lands exactly on the deadline in both modes.
+    // q_diag: per-solve state cost diagonal [6] — overrides the Q set by setConfig()
+    // r_scalar: per-solve input cost scalar applied uniformly to all 4 inputs
     int solve_waypoint(const double x0[NX],
                        const double x_target[NX],
                        double t_remaining,
                        double dt_hint,
                        bool lqr_ref,
+                       const double q_diag[NX],
+                       double r_scalar,
                        double* u_out);
 
     // Index selected by the most recent solve() call. Useful for logging.
     int prevIdx() const { return prev_idx_; }
+
+    // ETA (seconds) returned by the most recent solve_waypoint() call.
+    // Computed by forward-simulating the solved control sequence and finding
+    // the step at which the predicted trajectory is closest to x_target.
+    // Returns 0.0 before the first solve_waypoint() call.
+    double prevWaypointEta() const { return prev_waypoint_eta_; }
 
     // Copy x_ref_0[NX] for window_idx into x_ref_out. Returns false on bad index.
     bool getWindowRef(int window_idx, double x_ref_out[NX]) const;
@@ -135,7 +145,8 @@ private:
     // Cost-based window selection state
     WindowSelConfig win_sel_config_;
     int    prev_idx_;
-    int    prev_waypoint_n_;   // N_eff from previous solve_waypoint call; -1 = never called
+    int    prev_waypoint_n_;    // N_eff from previous solve_waypoint call; -1 = never called
+    double prev_waypoint_eta_;  // ETA (s) from the most recent solve_waypoint forward sim
     double elapsed_total_;  // seconds accumulated while on-path; drives time_idx_float
     bool   was_holding_;    // true if the previous solve was in hold (off-path) mode
 };
