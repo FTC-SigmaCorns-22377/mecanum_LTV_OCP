@@ -32,6 +32,11 @@
 // Use for all solve_waypoint calls. Safe to use even when x_f has zero
 // velocity (identical to ipm_solve in that degenerate case since the Euler
 // sim ends at the same point).
+// theta_sched_override: if non-null (length N+1), skip generate_heading_schedule
+// and use this array directly as the heading linearisation schedule.
+// Use when the caller has already computed a physically-correct heading path
+// (e.g. Hermite) and wants to decouple it from the cost-function reference
+// stored in ref_window[k].x_ref[2].
 QPSolution ipm_solve_terminal(
     const EulerDynamicsData& euler,
     const HeadingLookupData& hld,
@@ -41,4 +46,5 @@ QPSolution ipm_solve_terminal(
     const MPCConfig& config,
     const HeadingScheduleConfig& sched_config,
     const IpmSolverConfig& ipm_config,
-    IpmWorkspace& ws);
+    IpmWorkspace& ws,
+    const double* theta_sched_override = nullptr);

@@ -29,7 +29,8 @@ QPSolution ipm_solve_terminal(
     const MPCConfig& config,
     const HeadingScheduleConfig& sched_config,
     const IpmSolverConfig& ipm_config,
-    IpmWorkspace& ws)
+    IpmWorkspace& ws,
+    const double* theta_sched_override)
 {
     const int N = config.N;
 
@@ -38,7 +39,11 @@ QPSolution ipm_solve_terminal(
 
     // 1. Generate heading schedule
     double theta_sched[N_MAX + 1];
-    generate_heading_schedule(x0, ref_window, N, config.dt, sched_config, theta_sched);
+    if (theta_sched_override != nullptr) {
+        std::memcpy(theta_sched, theta_sched_override, (N + 1) * sizeof(double));
+    } else {
+        generate_heading_schedule(x0, ref_window, N, config.dt, sched_config, theta_sched);
+    }
 
     // 2. Build consistent 6-state reference using Euler dynamics
     //    x_ref[k+1] = A_euler · x_ref[k] + B_d(θ_k) · u_ref[k]
@@ -115,24 +120,94 @@ QPSolution ipm_solve_terminal(
     int total_iters = 0;
     float mu = ipm_config.mu_init;
 
+    // Convert theta schedule to float once — doesn't change across outer iterations.
+    float theta_f[N_MAX];
+    for (int i = 0; i < N; ++i) theta_f[i] = (float)theta_sched[i];
+
+    // Precompute tip thresholds in velocity-change-per-step units.
+    // B_body already carries the dt factor, so dv_tip = a_tip * dt is the
+    // max |Δv_body_i| = |B_body[i,:]·u + (D_i-1)·vb_i| allowed per step.
+    const bool use_tip = (config.a_tip_x > 0.0 || config.a_tip_y > 0.0);
+    const float dv_tip_x = (float)(config.a_tip_x * config.dt);
+    const float dv_tip_y = (float)(config.a_tip_y * config.dt);
+
     for (int outer = 0; outer < ipm_config.max_outer_iters && mu >= ipm_config.mu_min; ++outer) {
+        // --- Tipping constraint setup ---
+        // Forward-simulate body-frame velocities using current u_bar, and
+        // precompute the B_body·u_bar dot products (body-frame, theta=0) per step.
+        // These are re-evaluated each outer iteration as u_bar converges.
+        float vb_x[N_MAX] = {}, vb_y[N_MAX] = {};
+        float dot_bx[N_MAX] = {}, dot_by[N_MAX] = {};
+        if (use_tip) {
+            float vfx = (float)x0[3], vfy = (float)x0[4];
+            for (int k = 0; k < N; ++k) {
+                // Rotate field-frame velocity → body frame
+                float ct = cosf(theta_f[k]), st = sinf(theta_f[k]);
+                vb_x[k] =  ct * vfx + st * vfy;
+                vb_y[k] = -st * vfx + ct * vfy;
+
+                // Body-frame B·u at step k (B_body is at theta=0, body frame)
+                float bx = 0, by = 0;
+                for (int jj = 0; jj < NU; ++jj) {
+                    bx += euler.B_body[0 * 4 + jj] * u_bar[k * NU + jj];
+                    by += euler.B_body[1 * 4 + jj] * u_bar[k * NU + jj];
+                }
+                dot_bx[k] = bx;
+                dot_by[k] = by;
+
+                // Propagate field-frame velocity for next step
+                float Bu_fx = 0, Bu_fy = 0;
+                for (int jj = 0; jj < NU; ++jj) {
+                    float Bl0 =  ct * euler.B_body[0*4+jj] - st * euler.B_body[1*4+jj];
+                    float Bl1 =  st * euler.B_body[0*4+jj] + ct * euler.B_body[1*4+jj];
+                    Bu_fx += Bl0 * u_bar[k * NU + jj];
+                    Bu_fy += Bl1 * u_bar[k * NU + jj];
+                }
+                vfx = euler.D_diag[0] * vfx + Bu_fx;
+                vfy = euler.D_diag[1] * vfy + Bu_fy;
+            }
+        }
+
         // Compute barrier terms and form R_eff, ur_eff
         for (int i = 0; i < N * NU; ++i) {
+            int k = i / NU;
+            int j = i % NU;
             float u = u_bar[i];
             float slack_lo = u + 1.0f;
             float slack_hi = 1.0f - u;
             float W = mu / (slack_lo * slack_lo) + mu / (slack_hi * slack_hi);
             float g = -mu / slack_lo + mu / slack_hi;
-            int j = i % NU;
+
+            // Tipping constraint barriers.
+            // For each body-frame direction i, the net velocity change per step is:
+            //   Δv_i = B_body[i,:]·u + (D_i-1)·vb_i
+            // Constraint: |Δv_i| ≤ dv_tip_i.
+            // Barrier adds diagonal Hessian W_tip += mu·B[i,j]²/slack² per wheel j.
+            // The diagonal approximation is exact for mecanum (|B[i,j]| equal for all j).
+            if (use_tip) {
+                float damp_x = (euler.D_diag[0] - 1.0f) * vb_x[k];
+                float damp_y = (euler.D_diag[1] - 1.0f) * vb_y[k];
+                if (dv_tip_x > 0.0f) {
+                    float slo = std::max(dot_bx[k] + damp_x + dv_tip_x, 1e-6f);
+                    float shi = std::max(dv_tip_x - dot_bx[k] - damp_x, 1e-6f);
+                    float Bj  = euler.B_body[0 * 4 + j];
+                    W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
+                    g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                }
+                if (dv_tip_y > 0.0f) {
+                    float slo = std::max(dot_by[k] + damp_y + dv_tip_y, 1e-6f);
+                    float shi = std::max(dv_tip_y - dot_by[k] - damp_y, 1e-6f);
+                    float Bj  = euler.B_body[1 * 4 + j];
+                    W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
+                    g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                }
+            }
+
             float R_j   = (float)R_diag[j];
             float R_eff = R_j + W;
             ws.R_eff[i]  = R_eff;
             ws.ur_eff[i] = (R_j * (float)u_ref_stacked[i] + W * u - g) / R_eff;
         }
-
-        // Convert to float for Riccati kernel
-        float theta_f[N_MAX];
-        for (int i = 0; i < N; ++i) theta_f[i] = (float)theta_sched[i];
 
         // x_ref already has x_f patched into slot N — copy all N+1 nodes
         float xr_f[(N_MAX + 1) * 6];

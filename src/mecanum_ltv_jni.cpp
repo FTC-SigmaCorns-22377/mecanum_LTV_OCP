@@ -132,12 +132,14 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetModelParams(
 }
 
 // void nativeSetConfig(long handle, int N, double[] qDiag, double[] rDiag,
-//                      double[] qfDiag, double uMin, double uMax)
+//                      double[] qfDiag, double uMin, double uMax,
+//                      double aTipX, double aTipY)
 JNIEXPORT void JNICALL
 Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetConfig(
     JNIEnv* env, jclass, jlong handle,
     jint N, jdoubleArray qDiag, jdoubleArray rDiag, jdoubleArray qfDiag,
-    jdouble uMin, jdouble uMax)
+    jdouble uMin, jdouble uMax,
+    jdouble aTipX, jdouble aTipY)
 {
     if (!check_handle(env, handle)) return;
     if (!check_array(env, qDiag, NX, "qDiag")) return;
@@ -159,6 +161,8 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetConfig(
     cfg.u_min = uMin;
     cfg.u_max = uMax;
     // dt will be set in loadTrajectory
+    cfg.a_tip_x = aTipX;
+    cfg.a_tip_y = aTipY;
 
     // Fill diagonal matrices (column-major, zero off-diag already from zero-init)
     for (int i = 0; i < NX; ++i) {

@@ -264,111 +264,115 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
 
     const double dt = config_.dt;
 
-    // Shorten the effective horizon so Qf lands exactly on the deadline.
-    // N_eff = ceil(t_remaining / dt), capped at config_.N.
-    // When t_remaining >= N*dt, N_eff == N and nothing changes.
-    const int N_eff = (t_remaining > 0.0)
-        ? std::max(1, std::min((int)std::ceil(t_remaining / dt), config_.N))
-        : 1;
-
-    // Invalidate warm-start when the horizon length changes between calls
-    if (N_eff != prev_waypoint_n_) {
-        solver_ctx_.ipm_ws->warm_valid = false;
-        prev_waypoint_n_ = N_eff;
-    }
-
-    // Build a local config with the effective horizon and per-solve cost overrides
-    MPCConfig eff_cfg = config_;
-    eff_cfg.N = N_eff;
-    for (int i = 0; i < NX; ++i) eff_cfg.Q[i + NX * i]  = q_diag[i];
-    for (int i = 0; i < NU; ++i) eff_cfg.R[i + NU * i]   = r_scalar;
-
-    // Avoid division by zero for Hermite; when t_remaining <= 0 the reference
-    // will be all-target anyway (t clamped to 1)
-    const double T = t_remaining > 1e-6 ? t_remaining : 1e-6;
-
-    // Heading: always use Hermite so the heading schedule inside the IPM solver
-    // gets physically-correct B-matrix guidance throughout the horizon.
+    // Constants that don't change across the tRemaining refinement loop.
     const double dtheta = angle_wrap(x_target[2] - x0[2]);
-    const double theta1 = x0[2] + dtheta;   // unwrapped target heading
+    const double theta1 = x0[2] + dtheta;
     const double omega0 = x0[5];
     const double omega1 = x_target[5];
 
-    RefNode ref_window[N_MAX + 1];
+    const double q2_blended = q_diag[2];
 
-    for (int k = 0; k <= N_eff; ++k) {
-        const double tau = k * dt;
-        double t = tau / T;
-        if (t > 1.0) t = 1.0;
+    // ---------------------------------------------------------------------------
+    // Self-consistent tRemaining loop.
+    //
+    // The fixed point is ETA(t*) = t*: the horizon exactly matches how long the
+    // solver predicts it will take to reach the target.  Because ETA is monotone
+    // in t_remaining (larger horizon → gentler controls → later simulated arrival),
+    // the iteration contracts quickly — typically 1-2 steps from a large seed.
+    // We cap at 3 iterations; each re-uses the warm-start from the previous one
+    // so marginal cost is small.
+    // ---------------------------------------------------------------------------
+    double t_curr = t_remaining;
+    QPSolution sol;
 
-        // Hermite heading (always, for accurate B-matrix construction)
-        const double t2 = t * t, t3 = t2 * t;
-        const double h00 =  2.0*t3 - 3.0*t2 + 1.0;
-        const double h10 =      t3 - 2.0*t2 + t;
-        const double h01 = -2.0*t3 + 3.0*t2;
-        const double h11 =      t3 -      t2;
-        const double dh00 = ( 6.0*t2 - 6.0*t) / T;
-        const double dh10 =   3.0*t2 - 4.0*t + 1.0;
-        const double dh01 = (-6.0*t2 + 6.0*t) / T;
-        const double dh11 =   3.0*t2 - 2.0*t;
+    for (int outer = 0; outer < 3; ++outer) {
+        const int N_eff = (t_curr > 0.0)
+            ? std::max(1, std::min((int)std::ceil(t_curr / dt), config_.N))
+            : 1;
 
-        const double theta = angle_wrap(h00*x0[2] + h10*T*omega0
-                                      + h01*theta1 + h11*T*omega1);
-        const double omega = dh00*x0[2] + dh10*omega0
-                           + dh01*theta1 + dh11*omega1;
-        ref_window[k].x_ref[2] = theta;
-        ref_window[k].x_ref[5] = omega;
-        ref_window[k].theta    = theta;
-        ref_window[k].omega    = omega;
-
-        if (lqr_ref) {
-            // LQR mode: constant reference = x_target.
-            // The Riccati backward pass minimises Σ‖x_k − x_target‖²_Q + ‖u_k‖²_R
-            // + ‖x_N − x_target‖²_Qf, which is the exact discrete LQR cost.
-            // Optimal for zero-velocity arrival; well-behaved for others.
-            ref_window[k].x_ref[0] = x_target[0];  // px
-            ref_window[k].x_ref[1] = x_target[1];  // py
-            ref_window[k].x_ref[3] = x_target[3];  // vx
-            ref_window[k].x_ref[4] = x_target[4];  // vy
-            // theta / omega already set above from Hermite
-        } else {
-            // Hermite mode: smooth cubic reference matching position + velocity
-            // at both endpoints. Better for nonzero-velocity arrival targets.
-            ref_window[k].x_ref[0] = h00*x0[0]        + h10*T*x0[3]
-                                    + h01*x_target[0]  + h11*T*x_target[3];
-            ref_window[k].x_ref[3] = dh00*x0[0]       + dh10*x0[3]
-                                    + dh01*x_target[0] + dh11*x_target[3];
-            ref_window[k].x_ref[1] = h00*x0[1]        + h10*T*x0[4]
-                                    + h01*x_target[1]  + h11*T*x_target[4];
-            ref_window[k].x_ref[4] = dh00*x0[1]       + dh10*x0[4]
-                                    + dh01*x_target[1] + dh11*x_target[4];
+        // Invalidate warm-start when horizon length changes
+        if (N_eff != prev_waypoint_n_) {
+            solver_ctx_.ipm_ws->warm_valid = false;
+            prev_waypoint_n_ = N_eff;
         }
 
-        ref_window[k].t = tau;
-        std::memset(ref_window[k].u_ref, 0, NU * sizeof(double));
-    }
+        // Build per-iteration config
+        MPCConfig eff_cfg = config_;
+        eff_cfg.N = N_eff;
+        for (int i = 0; i < NX; ++i) eff_cfg.Q[i + NX * i] = q_diag[i];
+        for (int i = 0; i < NU; ++i) eff_cfg.R[i + NU * i] = r_scalar;
+        if (lqr_ref) eff_cfg.Q[2 + NX * 2] = q2_blended;
 
-    QPSolution sol = ipm_solve_terminal(
-        euler_data_, hld_, ref_window, x0, x_target, eff_cfg,
-        sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws);
+        // Avoid division by zero for Hermite
+        const double T = t_curr > 1e-6 ? t_curr : 1e-6;
 
-    std::memcpy(u_out, sol.U, NU * sizeof(double));
+        // Build reference window with Hermite heading schedule
+        RefNode ref_window[N_MAX + 1];
+        double  hermite_theta_sched[N_MAX + 1];
 
-    // ---------------------------------------------------------------------------
-    // ETA estimation: forward-simulate sol.U from x0, find the step at which
-    // the predicted trajectory is closest to x_target in XY position.
-    // This gives a self-consistent tRemaining hint for the next call.
-    // ---------------------------------------------------------------------------
-    {
-        double xs[3] = { x0[0], x0[1], x0[2] };  // position [px, py, theta]
-        double vs[3] = { x0[3], x0[4], x0[5] };  // velocity [vx, vy, omega]
+        for (int k = 0; k <= N_eff; ++k) {
+            const double tau = k * dt;
+            double t = tau / T;
+            if (t > 1.0) t = 1.0;
 
-        int    k_min  = 0;
+            const double t2 = t * t, t3 = t2 * t;
+            const double h00 =  2.0*t3 - 3.0*t2 + 1.0;
+            const double h10 =      t3 - 2.0*t2 + t;
+            const double h01 = -2.0*t3 + 3.0*t2;
+            const double h11 =      t3 -      t2;
+            const double dh00 = ( 6.0*t2 - 6.0*t) / T;
+            const double dh10 =   3.0*t2 - 4.0*t + 1.0;
+            const double dh01 = (-6.0*t2 + 6.0*t) / T;
+            const double dh11 =   3.0*t2 - 2.0*t;
+
+            const double theta = angle_wrap(h00*x0[2] + h10*T*omega0
+                                          + h01*theta1 + h11*T*omega1);
+            const double omega = dh00*x0[2] + dh10*omega0
+                               + dh01*theta1 + dh11*omega1;
+            hermite_theta_sched[k] = theta;
+            ref_window[k].theta    = theta;
+            ref_window[k].omega    = omega;
+
+            // Heading cost reference: always constant target so the Riccati sweep
+            // penalises the full heading error in both lqr_ref and Hermite modes.
+            // The Hermite arc is passed as theta_sched_override so B-matrices use
+            // the physically-correct rotation path regardless.
+            ref_window[k].x_ref[2] = theta1;
+            ref_window[k].x_ref[5] = x_target[5];
+
+            // Position cost reference differs by mode
+            if (lqr_ref) {
+                ref_window[k].x_ref[0] = x_target[0];
+                ref_window[k].x_ref[1] = x_target[1];
+                ref_window[k].x_ref[3] = x_target[3];
+                ref_window[k].x_ref[4] = x_target[4];
+            } else {
+                ref_window[k].x_ref[0] = h00*x0[0]       + h10*T*x0[3]
+                                        + h01*x_target[0] + h11*T*x_target[3];
+                ref_window[k].x_ref[3] = dh00*x0[0]      + dh10*x0[3]
+                                        + dh01*x_target[0]+ dh11*x_target[3];
+                ref_window[k].x_ref[1] = h00*x0[1]       + h10*T*x0[4]
+                                        + h01*x_target[1] + h11*T*x_target[4];
+                ref_window[k].x_ref[4] = dh00*x0[1]      + dh10*x0[4]
+                                        + dh01*x_target[1]+ dh11*x_target[4];
+            }
+            ref_window[k].t = tau;
+            std::memset(ref_window[k].u_ref, 0, NU * sizeof(double));
+        }
+
+        sol = ipm_solve_terminal(
+            euler_data_, hld_, ref_window, x0, x_target, eff_cfg,
+            sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws,
+            hermite_theta_sched);
+
+        // ETA: forward-simulate sol.U, find step closest to target in XY
+        double xs[3] = { x0[0], x0[1], x0[2] };
+        double vs[3] = { x0[3], x0[4], x0[5] };
+        int    k_min    = 0;
         double dist_min = (xs[0]-x_target[0])*(xs[0]-x_target[0])
                         + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
 
         for (int k = 0; k < N_eff; ++k) {
-            // Rotate B_body by current heading
             const double ct = std::cos(xs[2]), st = std::sin(xs[2]);
             double Bl[12];
             for (int j = 0; j < 4; ++j) {
@@ -376,31 +380,29 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
                 Bl[1*4+j] =  st*(double)euler_data_.B_body[0*4+j] + ct*(double)euler_data_.B_body[1*4+j];
                 Bl[2*4+j] = (double)euler_data_.B_body[2*4+j];
             }
-
-            // Bu = Bl · u[k]
             const double* uk = sol.U + k * NU;
             double Bu[3] = {};
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 4; ++j)
                     Bu[i] += Bl[i*4+j] * uk[j];
-
-            // Euler step: p_{k+1} = p_k + dt·v_k,  v_{k+1} = D·v_k + Bl·u_k
             for (int i = 0; i < 3; ++i) {
                 xs[i] += dt * vs[i];
                 vs[i]  = (double)euler_data_.D_diag[i] * vs[i] + Bu[i];
             }
-
             const double dist = (xs[0]-x_target[0])*(xs[0]-x_target[0])
                               + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
-            if (dist < dist_min) {
-                dist_min = dist;
-                k_min    = k + 1;  // +1 because we just propagated to step k+1
-            }
+            if (dist < dist_min) { dist_min = dist; k_min = k + 1; }
         }
 
-        prev_waypoint_eta_ = k_min * dt;
+        const double eta = k_min * dt;
+        prev_waypoint_eta_ = eta;
+
+        // Converged when ETA matches the current horizon to within one step
+        if (std::fabs(eta - t_curr) <= dt) break;
+        t_curr = std::max(eta, dt);
     }
 
+    std::memcpy(u_out, sol.U, NU * sizeof(double));
     return 0;
 }
 
