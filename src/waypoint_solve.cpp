@@ -131,15 +131,25 @@ QPSolution ipm_solve_terminal(
     const float dv_tip_x = (float)(config.a_tip_x * config.dt);
     const float dv_tip_y = (float)(config.a_tip_y * config.dt);
 
+    // IIR low-pass filter parameters for sustained-acceleration constraint.
+    // tau > 0: f_k = gamma*f_{k-1} + (1-gamma)*|a_body_k|, barrier on f_k <= dv_tip.
+    // tau = 0: per-step instantaneous two-sided barrier (original behaviour).
+    const bool use_iir = use_tip && (config.a_tip_tau > 1e-9);
+    const float tip_gamma = use_iir ? expf(-(float)(config.dt / config.a_tip_tau)) : 0.0f;
+    const float tip_alpha = 1.0f - tip_gamma;
+
     for (int outer = 0; outer < ipm_config.max_outer_iters && mu >= ipm_config.mu_min; ++outer) {
         // --- Tipping constraint setup ---
         // Forward-simulate body-frame velocities using current u_bar, and
-        // precompute the B_body·u_bar dot products (body-frame, theta=0) per step.
-        // These are re-evaluated each outer iteration as u_bar converges.
+        // precompute B_body·u_bar dot products (body-frame, theta=0) per step.
+        // For IIR mode, also accumulate the low-pass filtered |a_body| per step.
+        // Re-evaluated each outer iteration as u_bar converges.
         float vb_x[N_MAX] = {}, vb_y[N_MAX] = {};
         float dot_bx[N_MAX] = {}, dot_by[N_MAX] = {};
+        float filtered_ax[N_MAX] = {}, filtered_ay[N_MAX] = {};
         if (use_tip) {
             float vfx = (float)x0[3], vfy = (float)x0[4];
+            float f_x = 0.0f, f_y = 0.0f;
             for (int k = 0; k < N; ++k) {
                 // Rotate field-frame velocity → body frame
                 float ct = cosf(theta_f[k]), st = sinf(theta_f[k]);
@@ -154,6 +164,15 @@ QPSolution ipm_solve_terminal(
                 }
                 dot_bx[k] = bx;
                 dot_by[k] = by;
+
+                if (use_iir) {
+                    float damp_x_k = (euler.D_diag[0] - 1.0f) * vb_x[k];
+                    float damp_y_k = (euler.D_diag[1] - 1.0f) * vb_y[k];
+                    f_x = tip_gamma * f_x + tip_alpha * std::abs(bx + damp_x_k);
+                    f_y = tip_gamma * f_y + tip_alpha * std::abs(by + damp_y_k);
+                    filtered_ax[k] = f_x;
+                    filtered_ay[k] = f_y;
+                }
 
                 // Propagate field-frame velocity for next step
                 float Bu_fx = 0, Bu_fy = 0;
@@ -179,27 +198,45 @@ QPSolution ipm_solve_terminal(
             float g = -mu / slack_lo + mu / slack_hi;
 
             // Tipping constraint barriers.
-            // For each body-frame direction i, the net velocity change per step is:
-            //   Δv_i = B_body[i,:]·u + (D_i-1)·vb_i
-            // Constraint: |Δv_i| ≤ dv_tip_i.
-            // Barrier adds diagonal Hessian W_tip += mu·B[i,j]²/slack² per wheel j.
-            // The diagonal approximation is exact for mecanum (|B[i,j]| equal for all j).
             if (use_tip) {
                 float damp_x = (euler.D_diag[0] - 1.0f) * vb_x[k];
                 float damp_y = (euler.D_diag[1] - 1.0f) * vb_y[k];
                 if (dv_tip_x > 0.0f) {
-                    float slo = std::max(dot_bx[k] + damp_x + dv_tip_x, 1e-6f);
-                    float shi = std::max(dv_tip_x - dot_bx[k] - damp_x, 1e-6f);
-                    float Bj  = euler.B_body[0 * 4 + j];
-                    W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
-                    g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                    if (use_iir) {
+                        // One-sided barrier on IIR-filtered |a_body_x|.
+                        // ∂f_k/∂u[k,j] ≈ tip_alpha·B[0,j]·sign(dv_x_k)  (diagonal approx)
+                        float fax  = filtered_ax[k];
+                        float slack = std::max(dv_tip_x - fax, 1e-6f);
+                        float dv_x  = dot_bx[k] + damp_x;
+                        float sgn   = (dv_x >= 0.0f) ? 1.0f : -1.0f;
+                        float Bj_eff = tip_alpha * euler.B_body[0 * 4 + j] * sgn;
+                        W += mu * Bj_eff * Bj_eff / (slack * slack);
+                        g += mu * Bj_eff / slack;
+                    } else {
+                        // Original per-step two-sided barrier.
+                        float slo = std::max(dot_bx[k] + damp_x + dv_tip_x, 1e-6f);
+                        float shi = std::max(dv_tip_x - dot_bx[k] - damp_x, 1e-6f);
+                        float Bj  = euler.B_body[0 * 4 + j];
+                        W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
+                        g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                    }
                 }
                 if (dv_tip_y > 0.0f) {
-                    float slo = std::max(dot_by[k] + damp_y + dv_tip_y, 1e-6f);
-                    float shi = std::max(dv_tip_y - dot_by[k] - damp_y, 1e-6f);
-                    float Bj  = euler.B_body[1 * 4 + j];
-                    W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
-                    g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                    if (use_iir) {
+                        float fay  = filtered_ay[k];
+                        float slack = std::max(dv_tip_y - fay, 1e-6f);
+                        float dv_y  = dot_by[k] + damp_y;
+                        float sgn   = (dv_y >= 0.0f) ? 1.0f : -1.0f;
+                        float Bj_eff = tip_alpha * euler.B_body[1 * 4 + j] * sgn;
+                        W += mu * Bj_eff * Bj_eff / (slack * slack);
+                        g += mu * Bj_eff / slack;
+                    } else {
+                        float slo = std::max(dot_by[k] + damp_y + dv_tip_y, 1e-6f);
+                        float shi = std::max(dv_tip_y - dot_by[k] - damp_y, 1e-6f);
+                        float Bj  = euler.B_body[1 * 4 + j];
+                        W += mu * Bj * Bj * (1.0f / (slo * slo) + 1.0f / (shi * shi));
+                        g += mu * Bj * (-1.0f / slo + 1.0f / shi);
+                    }
                 }
             }
 

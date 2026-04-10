@@ -32,15 +32,20 @@ struct MPCConfig {
     double u_max;             // input upper bound (duty cycle, typically +1)
     double dt;                // control timestep (s)
     // Anti-tip acceleration limits (m/s²) in robot body frame.
-    // Prevents wheelies by adding a log-barrier on net body-frame acceleration
-    // at each step, parameterised by the predicted velocity at that step.
-    // Naturally allows full input authority at low speeds (the constraint only
-    // tightens when damping + braking torque would exceed the tip threshold).
+    // Prevents wheelies by adding a log-barrier on body-frame acceleration.
     //   a_tip_x = g * (half fore-aft wheelbase) / h_com
     //   a_tip_y = g * (half lateral track width) / h_com
     // Set to 0.0 (default) to disable.
-    double a_tip_x = 0.0;
-    double a_tip_y = 0.0;
+    //
+    // a_tip_tau (s): time constant for a first-order IIR low-pass filter on
+    // |a_body|.  0 (default) → per-step instantaneous barrier (original).
+    // Values around half the robot's pitch period (e.g. 0.15–0.4 s) allow
+    // brief transient accelerations while preventing sustained tip-inducing
+    // deceleration, eliminating mid-path chattering without sacrificing
+    // end-of-path protection.
+    double a_tip_x   = 0.0;
+    double a_tip_y   = 0.0;
+    double a_tip_tau = 0.0;
 };
 
 // Reference trajectory node
