@@ -365,12 +365,21 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
             sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws,
             hermite_theta_sched);
 
-        // ETA: forward-simulate sol.U, find step closest to target in XY
+        // ETA: forward-simulate sol.U, find step closest to target in XY + heading.
+        // Heading is weighted by (lx+ly)^2 so that 1 rad ≈ robot-radius metres,
+        // preventing the horizon from collapsing to 1 step on pure-rotation targets
+        // (where XY dist is 0 at all times and a 1-step solve from rest returns u=0).
+        const double heading_scale = (params_.lx + params_.ly) * (params_.lx + params_.ly);
         double xs[3] = { x0[0], x0[1], x0[2] };
         double vs[3] = { x0[3], x0[4], x0[5] };
         int    k_min    = 0;
-        double dist_min = (xs[0]-x_target[0])*(xs[0]-x_target[0])
-                        + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
+        double dist_min;
+        {
+            const double dh0 = angle_wrap(xs[2] - x_target[2]);
+            dist_min = (xs[0]-x_target[0])*(xs[0]-x_target[0])
+                     + (xs[1]-x_target[1])*(xs[1]-x_target[1])
+                     + heading_scale * dh0 * dh0;
+        }
 
         for (int k = 0; k < N_eff; ++k) {
             const double ct = std::cos(xs[2]), st = std::sin(xs[2]);
@@ -389,8 +398,10 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
                 xs[i] += dt * vs[i];
                 vs[i]  = (double)euler_data_.D_diag[i] * vs[i] + Bu[i];
             }
+            const double dh = angle_wrap(xs[2] - x_target[2]);
             const double dist = (xs[0]-x_target[0])*(xs[0]-x_target[0])
-                              + (xs[1]-x_target[1])*(xs[1]-x_target[1]);
+                              + (xs[1]-x_target[1])*(xs[1]-x_target[1])
+                              + heading_scale * dh * dh;
             if (dist < dist_min) { dist_min = dist; k_min = k + 1; }
         }
 

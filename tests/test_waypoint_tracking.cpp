@@ -105,6 +105,11 @@ static double vec_inf(const double* v, int n)
     return m;
 }
 
+// Default q_diag / r_scalar matching make_config() — used wherever tests
+// don't need to exercise per-solve cost overrides.
+static const double kDefaultQDiag[NX] = {20.0, 20.0, 5.0, 2.0, 2.0, 0.5};
+static constexpr double kDefaultRScalar = 0.1;
+
 // ---------------------------------------------------------------------------
 // Test cases
 // ---------------------------------------------------------------------------
@@ -123,7 +128,7 @@ static bool test_unconfigured_no_params()
     double x_tgt[NX]  = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     double u_out[NU]  = {};
 
-    int ret = ltv.solve_waypoint(x0, x_tgt, 0.5, 0.02, true, u_out);
+    int ret = ltv.solve_waypoint(x0, x_tgt, 0.5, 0.02, true, kDefaultQDiag, kDefaultRScalar, u_out);
     bool ok = (ret == -1);
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok;
@@ -143,7 +148,7 @@ static bool test_unconfigured_no_config()
     double x_tgt[NX] = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     double u_out[NU] = {};
 
-    int ret = ltv.solve_waypoint(x0, x_tgt, 0.5, 0.02, true, u_out);
+    int ret = ltv.solve_waypoint(x0, x_tgt, 0.5, 0.02, true, kDefaultQDiag, kDefaultRScalar, u_out);
     bool ok = (ret == -1);
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok;
@@ -162,7 +167,7 @@ static bool test_returns_zero_on_success()
     double x_tgt[NX] = {1.0, 0.5, 0.0, 0.0, 0.0, 0.0};
     double u_out[NU] = {};
 
-    int ret = ltv.solve_waypoint(x0, x_tgt, 0.4, 0.02, true, u_out);
+    int ret = ltv.solve_waypoint(x0, x_tgt, 0.4, 0.02, true, kDefaultQDiag, kDefaultRScalar, u_out);
     bool ok = (ret == 0);
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok;
@@ -192,7 +197,7 @@ static bool test_control_bounds()
     bool ok = true;
     for (auto& c : cases) {
         double u_out[NU] = {};
-        ltv.solve_waypoint(c.x0, c.xt, c.t_rem, 0.02, true, u_out);
+        ltv.solve_waypoint(c.x0, c.xt, c.t_rem, 0.02, true, kDefaultQDiag, kDefaultRScalar, u_out);
         for (int i = 0; i < NU; ++i) {
             if (u_out[i] < cfg.u_min - 1e-6 || u_out[i] > cfg.u_max + 1e-6)
                 ok = false;
@@ -216,7 +221,7 @@ static bool test_at_target_lqr_near_zero()
     double x_tgt[NX] = {0.5, 0.3, 0.1, 0.0, 0.0, 0.0};
     double u_out[NU] = {};
 
-    ltv.solve_waypoint(x, x_tgt, 0.4, 0.02, /*lqr_ref=*/true, u_out);
+    ltv.solve_waypoint(x, x_tgt, 0.4, 0.02, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_out);
 
     double ctrl_mag = vec_inf(u_out, NU);
     bool ok = (ctrl_mag < 1e-2);
@@ -237,7 +242,7 @@ static bool test_at_target_hermite_near_zero()
     double x_tgt[NX] = {-0.2, 0.7, 0.0, 0.0, 0.0, 0.0};
     double u_out[NU] = {};
 
-    ltv.solve_waypoint(x, x_tgt, 0.4, 0.02, /*lqr_ref=*/false, u_out);
+    ltv.solve_waypoint(x, x_tgt, 0.4, 0.02, /*lqr_ref=*/false, kDefaultQDiag, kDefaultRScalar, u_out);
 
     double ctrl_mag = vec_inf(u_out, NU);
     bool ok = (ctrl_mag < 1e-2);
@@ -273,7 +278,7 @@ static bool test_closed_loop_lqr_converges()
         if (t_rem < dt) t_rem = dt;   // keep at least one step
 
         double u_out[NU] = {};
-        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/true, u_out);
+        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_out);
         sim_step(x, u_out, params, dt);
 
         double err = pos_error(x, x_tgt);
@@ -316,7 +321,7 @@ static bool test_closed_loop_hermite_converges()
         if (t_rem < dt) t_rem = dt;
 
         double u_out[NU] = {};
-        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/false, u_out);
+        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/false, kDefaultQDiag, kDefaultRScalar, u_out);
         sim_step(x, u_out, params, dt);
         err_final = pos_error(x, x_tgt);
     }
@@ -360,7 +365,7 @@ static bool test_heading_convergence_lqr()
         if (t_rem < dt) t_rem = dt;
 
         double u_out[NU] = {};
-        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/true, u_out);
+        ltv.solve_waypoint(x, x_tgt, t_rem, dt, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_out);
         sim_step(x, u_out, params, dt);
         h_err_final = std::fabs(angle_wrap(x[2] - x_tgt[2]));
     }
@@ -386,7 +391,7 @@ static bool test_short_t_remaining_bounded()
 
     // t_remaining < dt → N_eff = ceil(t_rem/dt) = 1
     double u_out[NU] = {};
-    int ret = ltv.solve_waypoint(x, x_tgt, 0.005, 0.02, /*lqr_ref=*/true, u_out);
+    int ret = ltv.solve_waypoint(x, x_tgt, 0.005, 0.02, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_out);
 
     bool ok = (ret == 0);
     for (int i = 0; i < NU; ++i)
@@ -415,8 +420,8 @@ static bool test_controls_flip_with_target_direction()
     double x_tgt_B[NX] = {-1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
     double u_A[NU] = {}, u_B[NU] = {};
-    ltv.solve_waypoint(x0, x_tgt_A, 0.5, 0.02, /*lqr_ref=*/true, u_A);
-    ltv.solve_waypoint(x0, x_tgt_B, 0.5, 0.02, /*lqr_ref=*/true, u_B);
+    ltv.solve_waypoint(x0, x_tgt_A, 0.5, 0.02, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_A);
+    ltv.solve_waypoint(x0, x_tgt_B, 0.5, 0.02, /*lqr_ref=*/true, kDefaultQDiag, kDefaultRScalar, u_B);
 
     // Net longitudinal force is sum(u) for mecanum (symmetric wheel layout).
     // Forward target → positive sum; backward target → negative sum (or opposite sign).
