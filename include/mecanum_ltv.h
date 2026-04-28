@@ -5,6 +5,22 @@
 #include "qp_solvers.h"
 #include "heading_lookup.h"
 #include "ipm_solver.h"
+#include <unordered_map>
+
+struct LoadedTrajectory {
+    PrecomputedWindow* windows = nullptr;
+    int n_windows = 0;
+    int n_traj_windows = 0;
+    RefNode* ref_nodes = nullptr;
+    int n_ref_nodes = 0;
+    int prev_idx = 0;
+    double elapsed_total = 0.0;
+    bool was_holding = false;
+    ~LoadedTrajectory() {
+        delete[] windows;
+        delete[] ref_nodes;
+    }
+};
 
 // High-level MPC controller wrapping offline precomputation + online solve.
 // Owns all allocated memory; no raw pointers exposed.
@@ -40,6 +56,7 @@ public:
     // RefNodes with zero feedforward, and then precomputed.
     // Returns the number of MPC windows produced (0 on failure).
     int loadTrajectory(const double* samples, int n_samples, double dt);
+    bool setTrajectory(int handle);
 
     // Save precomputed windows to a .bin file (v2 format).
     // Returns 0 on success, non-zero on failure.
@@ -89,7 +106,7 @@ public:
                        double* u_out);
 
     // Index selected by the most recent solve() call. Useful for logging.
-    int prevIdx() const { return prev_idx_; }
+    int prevIdx() const { return active_traj_ ? active_traj_->prev_idx : 0; }
 
     // ETA (seconds) returned by the most recent solve_waypoint() call.
     // Computed by forward-simulating the solved control sequence and finding
@@ -102,8 +119,8 @@ public:
 
     // ---- Accessors ----
 
-    int numWindows() const { return n_windows_; }
-    int numTrajectoryWindows() const { return n_traj_windows_; }
+    int numWindows() const { return active_traj_ ? active_traj_->n_windows : 0; }
+    int numTrajectoryWindows() const { return active_traj_ ? active_traj_->n_traj_windows : 0; }
     int horizonLength() const { return config_.N; }
     int numVars() const { return config_.N * NU; }
 
@@ -120,13 +137,9 @@ private:
     bool params_set_;
     bool config_set_;
 
-    PrecomputedWindow* windows_;
-    int n_windows_;
-    int n_traj_windows_;  // number of original trajectory points (before padding)
-
-    // Padded reference trajectory (needed for HPIPM OCP path)
-    RefNode* ref_nodes_;
-    int n_ref_nodes_;
+    std::unordered_map<int, LoadedTrajectory*> trajectories_;
+    int next_traj_handle_ = 1;
+    LoadedTrajectory* active_traj_ = nullptr;
 
     // Heading-lookup LTV data (precomputed from model params + dt)
     HeadingLookupData hld_;
@@ -144,7 +157,6 @@ private:
 
     // Cost-based window selection state
     WindowSelConfig win_sel_config_;
-    int    prev_idx_;
     int    prev_waypoint_n_;    // N_eff from previous solve_waypoint call; -1 = never called
     double prev_waypoint_eta_;  // ETA (s) from the most recent solve_waypoint forward sim
     double elapsed_total_;  // seconds accumulated while on-path; drives time_idx_float

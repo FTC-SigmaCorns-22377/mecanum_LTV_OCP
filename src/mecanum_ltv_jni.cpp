@@ -432,3 +432,11 @@ Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeGetWaypointEta(
 }
 
 } // extern "C"
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_sigmacorns_control_ltv_MecanumLTVBridge_nativeSetTrajectory(
+    JNIEnv* env, jclass, jlong handle, jint trajHandle)
+{
+    if (!check_handle(env, handle)) return JNI_FALSE;
+    return from_handle(handle)->setTrajectory(trajHandle) ? JNI_TRUE : JNI_FALSE;
+}

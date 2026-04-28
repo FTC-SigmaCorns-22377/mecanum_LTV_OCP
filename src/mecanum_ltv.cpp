@@ -13,11 +13,7 @@ MecanumLTV::MecanumLTV()
     , config_{}
     , params_set_(false)
     , config_set_(false)
-    , windows_(nullptr)
-    , n_windows_(0)
-    , n_traj_windows_(0)
-    , ref_nodes_(nullptr)
-    , n_ref_nodes_(0)
+
     , hld_{}
     , sched_config_{}
     , hld_valid_(false)
@@ -27,18 +23,16 @@ MecanumLTV::MecanumLTV()
     , solver_ctx_valid_(false)
     , solver_type_(QpSolverType::FISTA)
     , win_sel_config_{}
-    , prev_idx_(0)
     , prev_waypoint_n_(-1)
     , prev_waypoint_eta_(0.0)
-    , elapsed_total_(0.0)
-    , was_holding_(false)
+
 {
 }
 
 MecanumLTV::~MecanumLTV()
 {
-    delete[] windows_;
-    delete[] ref_nodes_;
+    for (auto& pair : trajectories_) { delete pair.second; }
+    trajectories_.clear();
     solver_context_free(solver_ctx_);
 }
 
@@ -73,17 +67,17 @@ static void lerp_sample(const double* a, const double* b, double frac, double* o
 
 bool MecanumLTV::getWindowRef(int window_idx, double x_ref_out[NX]) const
 {
-    if (!windows_ || window_idx < 0 || window_idx >= n_windows_)
+    if (!active_traj_ || !active_traj_->windows || window_idx < 0 || window_idx >= active_traj_->n_windows)
         return false;
-    std::memcpy(x_ref_out, windows_[window_idx].x_ref_0, NX * sizeof(double));
+    std::memcpy(x_ref_out, active_traj_->windows[window_idx].x_ref_0, NX * sizeof(double));
     return true;
 }
 
 int MecanumLTV::saveWindows(const char* filepath) const
 {
-    if (!windows_ || n_windows_ <= 0)
+    if (!active_traj_ || !active_traj_->windows || active_traj_->n_windows <= 0)
         return -1;
-    return mpc_save_windows(filepath, windows_, n_windows_, config_);
+    return mpc_save_windows(filepath, active_traj_->windows, active_traj_->n_windows, config_);
 }
 
 int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
@@ -93,114 +87,100 @@ int MecanumLTV::loadTrajectory(const double* samples, int n_samples, double dt)
     if (n_samples < 2 || dt <= 0.0)
         return 0;
 
-    // Free previous windows and ref nodes
-    delete[] windows_;
-    windows_ = nullptr;
-    n_windows_ = 0;
-    n_traj_windows_ = 0;
-    delete[] ref_nodes_;
-    ref_nodes_ = nullptr;
-    n_ref_nodes_ = 0;
-    hld_valid_ = false;
-    euler_valid_ = false;
-    solver_context_free(solver_ctx_);
-    solver_context_init(solver_ctx_, config_.N * NU);
-    solver_ctx_valid_ = true;
+    if (config_.dt != dt || !hld_valid_ || !euler_valid_) {
+        hld_valid_ = false;
+        euler_valid_ = false;
+        solver_context_free(solver_ctx_);
+        solver_context_init(solver_ctx_, config_.N * NU);
+        solver_ctx_valid_ = true;
+    }
 
-    // Override config dt with the requested uniform dt
     config_.dt = dt;
 
-    // Determine time range
-    const double t_start = samples[0];  // first sample's t
-    const double t_end = samples[(n_samples - 1) * 7];  // last sample's t
+    const double t_start = samples[0];
+    const double t_end = samples[(n_samples - 1) * 7];
     const double duration = t_end - t_start;
     if (duration <= 0.0)
         return 0;
 
-    const int n_resampled = static_cast<int>(std::floor(duration / dt)) + 1;
+    ensure_hld_ready();
+    ensure_euler_ready();
+    ensure_solver_ctx_ready();
+
+    int n_resampled = static_cast<int>(std::floor(duration / dt)) + 1;
     if (n_resampled < config_.N + 1)
         return 0;
 
-    // Resample to uniform dt
+    auto traj = new LoadedTrajectory();
+    traj->n_traj_windows = n_resampled;
+
     RefNode* path = new RefNode[n_resampled];
 
     int src_idx = 0;
     for (int i = 0; i < n_resampled; ++i) {
         double t_target = t_start + i * dt;
-
-        // Clamp to end
-        if (t_target >= t_end) {
-            t_target = t_end;
+        while (src_idx + 1 < n_samples - 1 && samples[(src_idx + 1) * 7] < t_target) {
+            src_idx++;
         }
 
-        // Advance source index
-        while (src_idx < n_samples - 2 && samples[(src_idx + 1) * 7] < t_target)
-            ++src_idx;
+        const double t0 = samples[src_idx * 7 + 0];
+        const double t1 = samples[(src_idx + 1) * 7 + 0];
+        double alpha = (t_target - t0) / (t1 - t0);
+        alpha = std::max(0.0, std::min(1.0, alpha));
 
-        const double* sa = samples + src_idx * 7;
-        const double* sb = samples + (src_idx + 1) * 7;
-        double seg_dt = sb[0] - sa[0];
-
-        double interp[7];
-        if (seg_dt > 1e-12) {
-            double frac = (t_target - sa[0]) / seg_dt;
-            if (frac < 0.0) frac = 0.0;
-            if (frac > 1.0) frac = 1.0;
-            lerp_sample(sa, sb, frac, interp);
-        } else {
-            std::memcpy(interp, sa, 7 * sizeof(double));
+        for (int k = 0; k < 6; ++k) {
+            if (k == 2) {
+                double a0 = samples[src_idx * 7 + 3];
+                double a1 = samples[(src_idx + 1) * 7 + 3];
+                double da = a1 - a0;
+                while (da >  M_PI) da -= 2.0 * M_PI;
+                while (da < -M_PI) da += 2.0 * M_PI;
+                path[i].x_ref[k] = a0 + alpha * da;
+            } else {
+                double v0 = samples[src_idx * 7 + 1 + k];
+                double v1 = samples[(src_idx + 1) * 7 + 1 + k];
+                path[i].x_ref[k] = v0 + alpha * (v1 - v0);
+            }
         }
-
-        path[i].t = t_target;
-        path[i].x_ref[0] = interp[1]; // px
-        path[i].x_ref[1] = interp[2]; // py
-        path[i].x_ref[2] = interp[3]; // theta
-        path[i].x_ref[3] = interp[4]; // vx
-        path[i].x_ref[4] = interp[5]; // vy
-        path[i].x_ref[5] = interp[6]; // omega
-        path[i].theta = interp[3];
-        path[i].omega = interp[6];
-        std::memset(path[i].u_ref, 0, NU * sizeof(double));
+        for (int k = 0; k < 4; ++k) {
+            path[i].u_ref[k] = 0.0;
+        }
     }
 
-    // Pad path with N extra nodes at the final position with zero velocity,
-    // so the last resampled point still has a full horizon window ahead of it.
-    const int N = config_.N;
-    const int n_padded = n_resampled + N;
-    RefNode* padded_path = new RefNode[n_padded];
-    std::memcpy(padded_path, path, n_resampled * sizeof(RefNode));
+    traj->n_ref_nodes = n_resampled + config_.N;
+    traj->ref_nodes = new RefNode[traj->n_ref_nodes];
 
-    RefNode hold_node = path[n_resampled - 1];
-    hold_node.x_ref[3] = 0.0;  // vx = 0
-    hold_node.x_ref[4] = 0.0;  // vy = 0
-    hold_node.x_ref[5] = 0.0;  // omega = 0
-    hold_node.omega = 0.0;
-    std::memset(hold_node.u_ref, 0, NU * sizeof(double));
-    for (int i = 0; i < N; ++i) {
-        hold_node.t = path[n_resampled - 1].t + (i + 1) * dt;
-        padded_path[n_resampled + i] = hold_node;
+    for (int i = 0; i < n_resampled; ++i) {
+        traj->ref_nodes[i] = path[i];
     }
-
+    for (int i = n_resampled; i < traj->n_ref_nodes; ++i) {
+        traj->ref_nodes[i] = path[n_resampled - 1];
+    }
     delete[] path;
 
-    // Precompute all windows (now n_padded - N = n_resampled windows)
-    windows_ = mpc_precompute_all(padded_path, n_padded, params_, config_, n_windows_);
+    traj->windows = mpc_precompute_all(traj->ref_nodes, traj->n_ref_nodes, params_, config_, traj->n_windows);
+    if (!traj->windows || traj->n_windows <= 0) {
+        delete traj;
+        return 0;
+    }
 
-    // Transfer ownership of padded_path to ref_nodes_ for the HPIPM OCP path
-    ref_nodes_ = padded_path;
-    n_ref_nodes_ = n_padded;
+    int handle = next_traj_handle_++;
+    trajectories_[handle] = traj;
+    active_traj_ = traj;
 
-    // Store the index of the last real trajectory window for clamping
-    n_traj_windows_ = n_resampled;
-    prev_idx_ = 0;
-    elapsed_total_ = 0.0;
-    was_holding_ = false;
+    return handle;
+}
 
-    // Precompute heading-lookup LTV data and Euler dynamics
-    ensure_hld_ready();
-    ensure_euler_ready();
-
-    return n_windows_;
+bool MecanumLTV::setTrajectory(int handle) {
+    auto it = trajectories_.find(handle);
+    if (it != trajectories_.end()) {
+        active_traj_ = it->second;
+        active_traj_->prev_idx = 0;
+        active_traj_->elapsed_total = 0.0;
+        active_traj_->was_holding = false;
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -419,14 +399,14 @@ int MecanumLTV::solve_waypoint(const double x0[NX],
 
 int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
 {
-    if (!windows_ || n_windows_ <= 0)
+    if (!active_traj_ || !active_traj_->windows || active_traj_->n_windows <= 0)
         return -1;
 
     const double dt_nominal = config_.dt;
 
     // ---- Hold check: freeze window when robot is too far off-path ----
     // Compute XY distance from robot to the current reference window.
-    const double* cur_ref = windows_[prev_idx_].x_ref_0;
+    const double* cur_ref = active_traj_->windows[active_traj_->prev_idx].x_ref_0;
     const double dx_hold  = x0[0] - cur_ref[0];
     const double dy_hold  = x0[1] - cur_ref[1];
     const double pos_dist = std::sqrt(dx_hold*dx_hold + dy_hold*dy_hold);
@@ -435,29 +415,29 @@ int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
 
     if (pos_dist > win_sel_config_.hold_radius) {
         // Off-path: hold at current window, do not accumulate elapsed time.
-        window_idx = prev_idx_;
-        was_holding_ = true;
+        window_idx = active_traj_->prev_idx;
+        active_traj_->was_holding = true;
     } else {
-        // On-path: if we just transitioned in from holding, reset elapsed_total_
-        // so time_idx_float picks up cleanly from prev_idx_ with no accumulated debt.
-        if (was_holding_) {
-            elapsed_total_ = prev_idx_ * dt_nominal;
-            was_holding_ = false;
+        // On-path: if we just transitioned in from holding, reset active_traj_->elapsed_total
+        // so time_idx_float picks up cleanly from active_traj_->prev_idx with no accumulated debt.
+        if (active_traj_->was_holding) {
+            active_traj_->elapsed_total = active_traj_->prev_idx * dt_nominal;
+            active_traj_->was_holding = false;
         }
-        elapsed_total_ += dt_since_last;
-        const double time_idx_float = elapsed_total_ / dt_nominal;
+        active_traj_->elapsed_total += dt_since_last;
+        const double time_idx_float = active_traj_->elapsed_total / dt_nominal;
 
         // ---- Cost-based window selection ----
-        const int search_start = prev_idx_;
-        const int search_end   = std::min(prev_idx_ + win_sel_config_.search_radius,
-                                          n_windows_ - 1);
+        const int search_start = active_traj_->prev_idx;
+        const int search_end   = std::min(active_traj_->prev_idx + win_sel_config_.search_radius,
+                                          active_traj_->n_windows - 1);
 
         int cost_idx = search_start;
         double best_cost = 1e18;
         const double hw = win_sel_config_.heading_weight;
 
         for (int i = search_start; i <= search_end; ++i) {
-            const double* ref = windows_[i].x_ref_0;
+            const double* ref = active_traj_->windows[i].x_ref_0;
             double dx     = x0[0] - ref[0];
             double dy     = x0[1] - ref[1];
             double dtheta = angle_wrap(x0[2] - ref[2]);
@@ -480,27 +460,27 @@ int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
         }
 
         // Clamp: monotone and max-jump cap
-        window_idx = std::max(prev_idx_,
-                              std::min(window_idx, prev_idx_ + win_sel_config_.max_jump));
-        window_idx = std::max(0, std::min(window_idx, n_windows_ - 1));
+        window_idx = std::max(active_traj_->prev_idx,
+                              std::min(window_idx, active_traj_->prev_idx + win_sel_config_.max_jump));
+        window_idx = std::max(0, std::min(window_idx, active_traj_->n_windows - 1));
     }
 
-    const int delta = window_idx - prev_idx_;
-    prev_idx_ = window_idx;
+    const int delta = window_idx - active_traj_->prev_idx;
+    active_traj_->prev_idx = window_idx;
 
     // ---- Clamping at end: freeze warm-start ----
-    if (window_idx >= n_windows_ - 1) {
+    if (window_idx >= active_traj_->n_windows - 1) {
         solver_ctx_.box_ws.warm_valid = false;
     }
 
     if (solver_type_ == QpSolverType::NEON_IPM
-            && ref_nodes_
-            && window_idx + config_.N + 1 <= n_ref_nodes_) {
+            && active_traj_->ref_nodes
+            && window_idx + config_.N + 1 <= active_traj_->n_ref_nodes) {
         ensure_euler_ready();
-        if (window_idx >= n_windows_ - 1)
+        if (window_idx >= active_traj_->n_windows - 1)
             solver_ctx_.ipm_ws->warm_valid = false;
         QPSolution sol = heading_lookup_solve_ipm(
-            euler_data_, hld_, ref_nodes_ + window_idx, x0, config_,
+            euler_data_, hld_, active_traj_->ref_nodes + window_idx, x0, config_,
             sched_config_, *solver_ctx_.ipm_config, *solver_ctx_.ipm_ws);
         std::memcpy(u_out, sol.U,
                     static_cast<std::size_t>(config_.N * NU) * sizeof(double));
@@ -509,21 +489,21 @@ int MecanumLTV::solve(const double x0[NX], double dt_since_last, double* u_out)
 
 #ifdef MPC_USE_HPIPM
     if (solver_type_ == QpSolverType::HPIPM_OCP
-            && hld_valid_ && ref_nodes_
-            && window_idx + config_.N + 1 <= n_ref_nodes_) {
-        if (window_idx >= n_windows_ - 1)
+            && hld_valid_ && active_traj_->ref_nodes
+            && window_idx + config_.N + 1 <= active_traj_->n_ref_nodes) {
+        if (window_idx >= active_traj_->n_windows - 1)
             solver_ctx_.hpipm_ocp_ws.warm_valid = false;
         QPSolution sol = heading_lookup_solve_ocp(
-            hld_, ref_nodes_ + window_idx, x0, config_, sched_config_, solver_ctx_);
+            hld_, active_traj_->ref_nodes + window_idx, x0, config_, sched_config_, solver_ctx_);
         std::memcpy(u_out, sol.U,
                     static_cast<std::size_t>(config_.N * NU) * sizeof(double));
         return window_idx;
     }
 #endif
 
-    QPSolution sol = mpc_solve_online(windows_[window_idx], x0, config_,
+    QPSolution sol = mpc_solve_online(active_traj_->windows[window_idx], x0, config_,
                                       solver_ctx_.box_ws, delta);
-    const int n_vars = windows_[window_idx].n_vars;
+    const int n_vars = active_traj_->windows[window_idx].n_vars;
     std::memcpy(u_out, sol.U, n_vars * sizeof(double));
     return window_idx;
 }
